@@ -1,4 +1,4 @@
-# 2bSyn — 2bRAD-based Synteny Detection Engine
+# Syn2b — 2bRAD-based Synteny Detection Engine
 
 **2bSyn** is a Rust, alignment-free engine for detecting genome synteny and
 structural variation from **2bRAD tags** — the short, fixed-position sequences
@@ -517,4 +517,4 @@ rather than a bare `cargo test`.
 
 ## License
 
-MIT (see `Cargo.toml`). © 2bSyn Contributors.
+MIT (see `Cargo.toml`). © Syn2b Contributors.
