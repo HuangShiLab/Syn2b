@@ -1,6 +1,6 @@
 # Syn2b — 2bRAD-based Synteny Detection Engine
 
-**2bSyn** is a Rust, alignment-free engine for detecting genome synteny and
+**Syn2b** is a Rust, alignment-free engine for detecting genome synteny and
 structural variation from **2bRAD tags** — the short, fixed-position sequences
 produced by *Type IIB* restriction enzymes. Instead of aligning whole genomes,
 2bSyn represents each genome as an ordered series of sparse anchor tags (the
@@ -132,9 +132,6 @@ Syn2b/
     └── integration_tests.rs   # end-to-end tests (see status note below)
 ```
 
-The Cargo package, the library crate, and the binary are all named **`Syn2b`**
-(a Cargo *package* name may not start with a digit, which is why the project is
-`Syn2b` and not `2bsyn`; the library and binary targets share the same name).
 
 ---
 
