@@ -106,11 +106,11 @@ tag as a graph node and each observed adjacency as an edge.
 ## Repository layout
 
 ```
-tobSyn/
-├── Cargo.toml                  # package `Syn2b`, lib `bsyn`, bin `2bsyn`
+Syn2b/
+├── Cargo.toml                  # package / lib / bin all named `Syn2b`
 ├── src/
 │   ├── main.rs                # CLI entry point (clap): digest / synteny / coverage / convert
-│   ├── lib.rs                 # public API re-exports (crate name: `bsyn`)
+│   ├── lib.rs                 # public API re-exports (crate name: `Syn2b`)
 │   ├── tgt/                   # TGT core data structures
 │   │   ├── tag.rs             # Tag  (32 bp sequence + position + enzyme + strand)
 │   │   ├── gap.rs             # Gap  (inter-tag distance in bp)
@@ -132,9 +132,9 @@ tobSyn/
     └── integration_tests.rs   # end-to-end tests (see status note below)
 ```
 
-The Cargo package is named **`Syn2b`**, the library crate is **`bsyn`**, and the
-binary is **`2bsyn`** (a Cargo *package* name may not start with a digit, so the
-package is `Syn2b` even though the binary target stays `2bsyn`).
+The Cargo package, the library crate, and the binary are all named **`Syn2b`**
+(a Cargo *package* name may not start with a digit, which is why the project is
+`Syn2b` and not `2bsyn`; the library and binary targets share the same name).
 
 ---
 
@@ -227,15 +227,14 @@ Requires a stable Rust toolchain (Rust 2021 edition; install via
 [rustup](https://rustup.rs)).
 
 ```bash
-cd tobSyn
+cd Syn2b
 cargo build --release
 ```
 
-This compiles cleanly (a few dead-code/unused-import warnings only) and produces
-the `2bsyn` binary at `target/release/2bsyn`. The Cargo **package** is named
-`Syn2b` because a package name may not start with a digit; the binary and library
-**targets** are `2bsyn` and `bsyn` respectively (target names *may* start with a
-digit).
+This compiles cleanly (only a couple of dead-code/unused-import warnings) and
+produces the `Syn2b` binary at `target/release/Syn2b`. The Cargo package, the
+library crate, and the binary target are all named `Syn2b` — a package name may
+not start with a digit, which is why the project is not called `2bsyn`.
 
 Dependencies (from `Cargo.toml`): `clap` (CLI), `anyhow` (errors), `serde` +
 `bincode` (serialization), `parking_lot`, and `rayon` (parallelism);
@@ -246,7 +245,7 @@ Dependencies (from `Cargo.toml`): `clap` (CLI), `anyhow` (errors), `serde` +
 ## Command-line usage
 
 ```
-2bsyn <COMMAND> [OPTIONS]
+Syn2b <COMMAND> [OPTIONS]
 
 Commands:
   digest    In silico digest genomes with 2bRAD enzymes
@@ -259,19 +258,19 @@ Examples:
 
 ```bash
 # Digest a genome with the default enzyme (BcgI) into a text TGT file
-2bsyn digest -i genome.fasta -o genome.tgt
+Syn2b digest -i genome.fasta -o genome.tgt
 
 # Digest with all 16 enzymes, writing the compact binary format
-2bsyn digest -i genomes/ -o out/ --enzymes all --format binary
+Syn2b digest -i genomes/ -o out/ --enzymes all --format binary
 
 # Multi-enzyme coverage statistics
-2bsyn coverage -i genome.fasta --enzymes all
+Syn2b coverage -i genome.fasta --enzymes all
 
 # Compute synteny across a set of TGT records
-2bsyn synteny -i tgts/ -o synteny_report.txt
+Syn2b synteny -i tgts/ -o synteny_report.txt
 
 # Convert a text TGT to binary (or vice versa)
-2bsyn convert -i genome.tgt -o genome.btgt --format binary
+Syn2b convert -i genome.tgt -o genome.btgt --format binary
 ```
 
 Common options: `-i/--input`, `-o/--output`, `-e/--enzymes`
@@ -286,14 +285,14 @@ Common options: `-i/--input`, `-o/--output`, `-e/--enzymes`
 
 ## Library usage
 
-The crate exposes its functionality as the `bsyn` library. Representative API:
+The crate exposes its functionality as the `Syn2b` library. Representative API:
 
 ```rust
-use bsyn::enzyme::EnzymeType;
-use bsyn::enzyme::enzyme::Enzyme;
-use bsyn::enzyme::digest::digest_genome;
-use bsyn::tgt::{Tag, Gap, TgtRecord, TgtReader, TgtWriter, Strand};
-use bsyn::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
+use Syn2b::enzyme::EnzymeType;
+use Syn2b::enzyme::enzyme::Enzyme;
+use Syn2b::enzyme::digest::digest_genome;
+use Syn2b::tgt::{Tag, Gap, TgtRecord, TgtReader, TgtWriter, Strand};
+use Syn2b::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
 use std::path::Path;
 
 // 1. Enzyme properties
@@ -328,7 +327,7 @@ let blocks = extract_synteny_blocks(&g);
 `TgtRecord` also offers `median_gap()`, `max_gap()`, `coverage_fraction()`
 (estimated fraction of the genome covered by tag bases), and `enzyme_count()`.
 `Tag` provides `sequence_str()` and `hamming_distance()`; `Strand` provides
-`to_u8()` / `from_u8()` for the binary format. Utilities in `bsyn::utils` include
+`to_u8()` / `from_u8()` for the binary format. Utilities in `Syn2b::utils` include
 `reverse_complement`, `is_valid_dna`, and `gc_content`.
 
 > Note: the `Enzyme::properties(...)` / `TagAdjacencyGraph::new()` signatures
@@ -488,7 +487,7 @@ See the top-level repository for the full analyses:
 ## Testing
 
 ```bash
-cd tobSyn
+cd Syn2b
 cargo test --lib      # library unit tests
 ```
 

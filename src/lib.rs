@@ -5,6 +5,9 @@
 //! to detect genomic structural variations and infer synteny relationships
 //! between microbial genomes.
 
+// The crate is intentionally named `Syn2b` (not snake_case); silence the lint.
+#![allow(non_snake_case)]
+
 pub mod enzyme;
 pub mod io;
 pub mod synteny;

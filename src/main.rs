@@ -3,15 +3,18 @@
 //! CLI application for in silico digestion, TGT format conversion,
 //! multi-enzyme coverage analysis, and synteny detection.
 
+// The crate is intentionally named `Syn2b` (not snake_case); silence the lint.
+#![allow(non_snake_case)]
+
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 use std::path::PathBuf;
 
-use bsyn::enzyme::EnzymeType;
-use bsyn::tgt::{Strand, Tag, TgtRecord};
+use Syn2b::enzyme::EnzymeType;
+use Syn2b::tgt::{Strand, Tag, TgtRecord};
 
 #[derive(Parser)]
-#[command(name = "2bsyn")]
+#[command(name = "Syn2b")]
 #[command(about = "2bRAD-based Synteny Detection Engine")]
 #[command(version)]
 struct Cli {
@@ -73,7 +76,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Digest { input, output, enzymes, format } => {
-            println!("2bsyn digest — In silico genome digestion");
+            println!("Syn2b digest — In silico genome digestion");
             println!("  input:  {:?}", input);
             println!("  output: {:?}", output);
             println!("  enzymes: {}", enzymes);
@@ -94,9 +97,9 @@ fn main() -> Result<()> {
 
             // TODO: Full pipeline implementation:
             // 1. Read FASTA file(s) from input
-            // 2. For each genome, call bsyn::enzyme::digest_multi_enzyme
-            // 3. Merge tags with bsyn::enzyme::merge_multi_enzyme_tags
-            // 4. Write TGT output (text or binary) using bsyn::tgt::TgtWriter
+            // 2. For each genome, call Syn2b::enzyme::digest_multi_enzyme
+            // 3. Merge tags with Syn2b::enzyme::merge_multi_enzyme_tags
+            // 4. Write TGT output (text or binary) using Syn2b::tgt::TgtWriter
 
             println!("Digest subcommand — full implementation in progress");
             println!("This will:");
@@ -107,7 +110,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Synteny { input, output } => {
-            println!("2bsyn synteny — Synteny detection");
+            println!("Syn2b synteny — Synteny detection");
             println!("  input:  {:?}", input);
             println!("  output: {:?}", output);
 
@@ -123,7 +126,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Coverage { input, enzymes } => {
-            println!("2bsyn coverage — Multi-enzyme coverage analysis");
+            println!("Syn2b coverage — Multi-enzyme coverage analysis");
             println!("  input:   {:?}", input);
             println!("  enzymes: {}", enzymes);
 
@@ -150,7 +153,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Convert { input, output, format } => {
-            println!("2bsyn convert — TGT format conversion");
+            println!("Syn2b convert — TGT format conversion");
             println!("  input:  {:?}", input);
             println!("  output: {:?}", output);
             println!("  format: {}", format);

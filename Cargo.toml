@@ -18,9 +18,9 @@ rayon = "1.8"
 tempfile = "3"
 
 [[bin]]
-name = "2bsyn"
+name = "Syn2b"
 path = "src/main.rs"
 
 [lib]
-name = "bsyn"
+name = "Syn2b"
 path = "src/lib.rs"

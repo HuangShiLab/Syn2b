@@ -11,14 +11,14 @@ use std::process::Command;
 #[test]
 fn test_enzyme_count() {
     // All 16 enzymes should be defined
-    use bsyn::enzyme::EnzymeType;
+    use Syn2b::enzyme::EnzymeType;
     let all = EnzymeType::all();
     assert_eq!(all.len(), 16, "Expected 16 enzyme types");
 }
 
 #[test]
 fn test_enzyme_type_variants() {
-    use bsyn::enzyme::EnzymeType;
+    use Syn2b::enzyme::EnzymeType;
     // Verify all 16 variants exist
     let _ = EnzymeType::BcgI;
     let _ = EnzymeType::AlfI;
@@ -40,7 +40,7 @@ fn test_enzyme_type_variants() {
 
 #[test]
 fn test_enzyme_properties() {
-    use bsyn::enzyme::EnzymeType;
+    use Syn2b::enzyme::EnzymeType;
     let bcgi = EnzymeType::BcgI.properties();
     assert_eq!(bcgi.enzyme_type, EnzymeType::BcgI);
     assert_eq!(bcgi.tag_length, 32);
@@ -52,8 +52,8 @@ fn test_enzyme_properties() {
 
 #[test]
 fn test_tag_creation() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag};
 
     let seq = [b'A'; 32];
     let tag = Tag::new(seq, 100, EnzymeType::BcgI, Strand::Forward);
@@ -66,8 +66,8 @@ fn test_tag_creation() {
 
 #[test]
 fn test_hamming_distance() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag};
 
     let seq1 = [b'A'; 32];
     let mut seq2 = [b'A'; 32];
@@ -82,8 +82,8 @@ fn test_hamming_distance() {
 
 #[test]
 fn test_tgt_record_creation() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag, TgtRecord};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag, TgtRecord};
 
     let mut record = TgtRecord::new("E_coli_K12", 4_641_652);
     assert_eq!(record.genome_id, "E_coli_K12");
@@ -99,8 +99,8 @@ fn test_tgt_record_creation() {
 
 #[test]
 fn test_tgt_record_gaps() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag, TgtRecord};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag, TgtRecord};
 
     let mut record = TgtRecord::new("test_genome", 10000);
 
@@ -120,8 +120,8 @@ fn test_tgt_record_gaps() {
 
 #[test]
 fn test_gap_statistics() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag, TgtRecord};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag, TgtRecord};
 
     let mut record = TgtRecord::new("test", 100000);
 
@@ -141,7 +141,7 @@ fn test_gap_statistics() {
 
 #[test]
 fn test_tag_adjacency_graph_creation() {
-    use bsyn::synteny::TagAdjacencyGraph;
+    use Syn2b::synteny::TagAdjacencyGraph;
 
     let graph = TagAdjacencyGraph::new(2);
     assert_eq!(graph.node_count(), 0);
@@ -151,7 +151,7 @@ fn test_tag_adjacency_graph_creation() {
 
 #[test]
 fn test_synteny_block_creation() {
-    use bsyn::synteny::SyntenyBlock;
+    use Syn2b::synteny::SyntenyBlock;
 
     let block = SyntenyBlock::new(1, 10, 50);
     assert_eq!(block.block_id, 1);
@@ -166,7 +166,7 @@ fn test_synteny_block_creation() {
 
 #[test]
 fn test_fasta_record_creation() {
-    use bsyn::io::FastaRecord;
+    use Syn2b::io::FastaRecord;
 
     let record = FastaRecord::new("test_id", b"ATGC".to_vec(), Some("description".to_string()));
     assert_eq!(record.id, "test_id");
@@ -181,7 +181,7 @@ fn test_fasta_record_creation() {
 
 #[test]
 fn test_reverse_complement() {
-    use bsyn::utils::reverse_complement;
+    use Syn2b::utils::reverse_complement;
 
     assert_eq!(reverse_complement(b"ATGC"), vec![b'GCAT']);
     assert_eq!(reverse_complement(b"AAAA"), vec![b'TTTT']);
@@ -189,7 +189,7 @@ fn test_reverse_complement() {
 
 #[test]
 fn test_gc_content() {
-    use bsyn::utils::gc_content;
+    use Syn2b::utils::gc_content;
 
     assert_eq!(gc_content(b"ATGC"), 0.5);
     assert_eq!(gc_content(b"ATAT"), 0.0);
@@ -231,9 +231,9 @@ fn test_cli_help() {
 
 #[test]
 fn test_binary_roundtrip() {
-    use bsyn::enzyme::EnzymeType;
-    use bsyn::tgt::{Strand, Tag, TgtRecord};
-    use bsyn::tgt::{TgtReader, TgtWriter};
+    use Syn2b::enzyme::EnzymeType;
+    use Syn2b::tgt::{Strand, Tag, TgtRecord};
+    use Syn2b::tgt::{TgtReader, TgtWriter};
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
@@ -269,7 +269,7 @@ fn test_binary_roundtrip() {
 
 #[test]
 fn test_bcgI_digest_empty_sequence() {
-    use bsyn::enzyme::{digest_genome, EnzymeType};
+    use Syn2b::enzyme::{digest_genome, EnzymeType};
 
     let seq = b"";
     let tags = digest_genome(seq, EnzymeType::BcgI);
@@ -278,7 +278,7 @@ fn test_bcgI_digest_empty_sequence() {
 
 #[test]
 fn test_bcgI_digest_no_sites() {
-    use bsyn::enzyme::{digest_genome, EnzymeType};
+    use Syn2b::enzyme::{digest_genome, EnzymeType};
 
     // Sequence with no BcgI recognition site (CGANNNNNNTGC)
     let seq = b"ATATATATATATATATATATATATATATATATATATATATATATATAT";
@@ -288,7 +288,7 @@ fn test_bcgI_digest_no_sites() {
 
 #[test]
 fn test_multi_enzyme_digest() {
-    use bsyn::enzyme::{digest_multi_enzyme, EnzymeType};
+    use Syn2b::enzyme::{digest_multi_enzyme, EnzymeType};
 
     let seq = b"CGAAAAAAAAAATGCATATATATATATGCGAAAAAAAAAATGC";
     let enzymes = vec![EnzymeType::BcgI, EnzymeType::AlfI];
