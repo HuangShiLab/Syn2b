@@ -11,6 +11,26 @@ pub enum Strand {
     Reverse,
 }
 
+impl Strand {
+    /// Encode the strand as a single byte for the binary TGT format
+    /// (0 = forward, 1 = reverse).
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            Strand::Forward => 0,
+            Strand::Reverse => 1,
+        }
+    }
+
+    /// Decode a strand from a single byte. Returns `None` for invalid values.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Strand::Forward),
+            1 => Some(Strand::Reverse),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Strand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

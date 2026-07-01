@@ -7,10 +7,11 @@ produced by *Type IIB* restriction enzymes. Instead of aligning whole genomes,
 **Tag–Gap–Tag / TGT** model) and infers synteny from how the *order and
 adjacency* of those tags are conserved across genomes.
 
-> **Status: research prototype.** The core data structures, TGT I/O, adjacency
-> graph, and scoring metrics are implemented and unit-tested, but the command-line
-> pipeline is still a scaffold and the crate needs a few small fixes to compile.
-> See [Project status & roadmap](#project-status--roadmap) before relying on it.
+> **Status: research prototype.** The crate builds (`cargo build --release`) and
+> its core data structures, TGT I/O, adjacency graph, and scoring metrics are
+> implemented and unit-tested. The command-line pipeline, however, is still a
+> scaffold and the in-silico digestion is not yet complete. See
+> [Project status & roadmap](#project-status--roadmap) before relying on it.
 
 ---
 
@@ -105,8 +106,8 @@ tag as a graph node and each observed adjacency as an edge.
 ## Repository layout
 
 ```
-2bsyn/
-├── Cargo.toml
+tobSyn/
+├── Cargo.toml                  # package `Syn2b`, lib `bsyn`, bin `2bsyn`
 ├── src/
 │   ├── main.rs                # CLI entry point (clap): digest / synteny / coverage / convert
 │   ├── lib.rs                 # public API re-exports (crate name: `bsyn`)
@@ -131,7 +132,9 @@ tag as a graph node and each observed adjacency as an edge.
     └── integration_tests.rs   # end-to-end tests (see status note below)
 ```
 
-The library crate is named **`bsyn`** and the binary is **`2bsyn`**.
+The Cargo package is named **`Syn2b`**, the library crate is **`bsyn`**, and the
+binary is **`2bsyn`** (a Cargo *package* name may not start with a digit, so the
+package is `Syn2b` even though the binary target stays `2bsyn`).
 
 ---
 
@@ -224,21 +227,15 @@ Requires a stable Rust toolchain (Rust 2021 edition; install via
 [rustup](https://rustup.rs)).
 
 ```bash
-cd 2bsyn
+cd tobSyn
 cargo build --release
 ```
 
-> **Heads-up (current state).** The crate does **not** build unmodified yet.
-> Two categories of fixes are needed:
->
-> 1. **Package name.** `Cargo.toml` sets `name = "2bsyn"`, but Cargo package
->    names may not start with a digit. Rename the package (e.g. `bsyn`) — the
->    library (`bsyn`) and binary (`2bsyn`) target names are already valid.
-> 2. **Three missing helper methods** referenced by the I/O layer:
->    `TgtRecord::enzyme_count()`, `Strand::to_u8()`, and `Strand::from_u8()`.
->
-> These are small additions; the rest of the library compiles once they are in
-> place. See [Project status & roadmap](#project-status--roadmap).
+This compiles cleanly (a few dead-code/unused-import warnings only) and produces
+the `2bsyn` binary at `target/release/2bsyn`. The Cargo **package** is named
+`Syn2b` because a package name may not start with a digit; the binary and library
+**targets** are `2bsyn` and `bsyn` respectively (target names *may* start with a
+digit).
 
 Dependencies (from `Cargo.toml`): `clap` (CLI), `anyhow` (errors), `serde` +
 `bincode` (serialization), `parking_lot`, and `rayon` (parallelism);
@@ -328,9 +325,10 @@ for path in g.linear_paths() {
 let blocks = extract_synteny_blocks(&g);
 ```
 
-`TgtRecord` also offers `median_gap()`, `max_gap()`, and `coverage_fraction()`
-(estimated fraction of the genome covered by tag bases). `Tag` provides
-`sequence_str()` and `hamming_distance()`. Utilities in `bsyn::utils` include
+`TgtRecord` also offers `median_gap()`, `max_gap()`, `coverage_fraction()`
+(estimated fraction of the genome covered by tag bases), and `enzyme_count()`.
+`Tag` provides `sequence_str()` and `hamming_distance()`; `Strand` provides
+`to_u8()` / `from_u8()` for the binary format. Utilities in `bsyn::utils` include
 `reverse_complement`, `is_valid_dna`, and `gc_content`.
 
 > Note: the `Enzyme::properties(...)` / `TagAdjacencyGraph::new()` signatures
@@ -399,9 +397,10 @@ graph.
 **What is implemented and unit-tested**
 
 - TGT data model: `Tag`, `Gap`, `TgtRecord` (gap statistics, coverage fraction,
-  text `Display`).
-- TGT text I/O (`TgtReader::read_record` / `TgtWriter::write_record`) with
-  round-trip parsing and gap validation.
+  enzyme count, text `Display`).
+- TGT text I/O (`TgtReader::read_record` / `TgtWriter::write_record`) and the
+  fixed-layout binary I/O (`read_binary` / `write_binary`, incl. `Strand`
+  encode/decode), with gap validation.
 - Streaming FASTA reader (`FastaReader`).
 - Enzyme catalog: 16 `EnzymeType` variants, index round-trips, and per-enzyme
   `Enzyme::properties`.
@@ -411,35 +410,34 @@ graph.
 - All scoring metrics.
 - DNA utilities (`reverse_complement`, `is_valid_dna`, `gc_content`).
 
-**Known gaps to reach a working build/pipeline**
+**Known gaps**
 
-- **`Cargo.toml` package name** starts with a digit (`2bsyn`) — invalid; rename
-  the package (targets `bsyn`/`2bsyn` are fine).
-- **Three helper methods** used by the I/O layer are not yet defined:
-  `TgtRecord::enzyme_count()`, `Strand::to_u8()`, `Strand::from_u8()`. Adding
-  them makes the library compile.
-- **Digestion offset model is incomplete.** The tag window derived from
+- **In-silico digestion is incomplete.** The tag window derived from
   `cut_offset_5`/`cut_offset_3` does not currently match each enzyme's declared
   `tag_length` (e.g. BcgI's ±10 offsets yield a 20 bp window vs. `tag_length =
   32`), so `digest_genome` does not yet emit correct-length tags on real
   sequence. The recognition-site search and IUPAC matching themselves work.
 - **CLI subcommands are scaffolds** — they validate arguments and print intended
   actions but do not yet run the digest→TGT→graph→report pipeline.
-- **Binary I/O**, **multi-enzyme digestion** (`digest_multi_enzyme`,
-  `merge_multi_enzyme_tags`), and some type signatures are described in
-  [`SPEC.md`](../SPEC.md) and exercised by `tests/integration_tests.rs`, but the
-  library API has not fully converged on that target surface, so those
-  integration tests will not all compile/pass as written.
+- **Multi-enzyme digestion** (`digest_multi_enzyme`, `merge_multi_enzyme_tags`)
+  and some type signatures described in [`SPEC.md`](../SPEC.md) / exercised by
+  `tests/integration_tests.rs` are not yet implemented, so the integration-test
+  target does not compile against the current library.
+- **Seven library unit tests fail** for pre-existing reasons unrelated to the
+  build: five test *helpers* overflow `u8` (`i * 100` with `i: u8`) in
+  `scoring.rs` / `graph.rs`, and two text-format assertions compare against
+  `sequence_str()`, which returns the full zero-padded 32-byte array. **58 of 65
+  pass.**
 
 **Roadmap**
 
-1. Make the crate build (package rename + the three helpers).
-2. Fix the digestion window so tag length matches the enzyme definition; validate
+1. Fix the digestion window so tag length matches each enzyme definition; validate
    against the SPEC targets (~1,169 BcgI tags on *E. coli* K-12; ~8.4% combined
    coverage for 16 enzymes).
-3. Add multi-enzyme digestion and wire the CLI subcommands to the library.
-4. Reconcile the library API with `SPEC.md` / the integration tests.
-5. Add the structural-decoupling benchmark described below.
+2. Add multi-enzyme digestion and wire the CLI subcommands to the library.
+3. Reconcile the library API with `SPEC.md` / the integration tests, and fix the
+   pre-existing unit-test failures.
+4. Add the structural-decoupling benchmark described below.
 
 ---
 
@@ -490,16 +488,19 @@ See the top-level repository for the full analyses:
 ## Testing
 
 ```bash
-cd 2bsyn
-cargo test            # unit + integration tests
+cd tobSyn
+cargo test --lib      # library unit tests
 ```
 
-Every library module carries unit tests (enzyme catalog, digestion stubs, TGT
-text I/O and gap validation, FASTA parsing, graph construction/simplification/
-paths, block extraction/indels, and all scoring metrics). `tests/integration_tests.rs`
-targets the higher-level API from `SPEC.md`; some of those tests assume
-functions/signatures the library has not converged on yet (see
-[Project status](#project-status--roadmap)).
+Every library module carries unit tests (enzyme catalog, digestion, TGT text and
+binary I/O with gap validation, FASTA parsing, graph construction / simplification
+/ paths, block extraction / indels, and the scoring metrics). At present **58 of
+65 unit tests pass**; the 7 failures are pre-existing issues unrelated to the
+build fix — mostly `u8` overflow inside test helpers (see
+[Known gaps](#project-status--roadmap)). The higher-level
+`tests/integration_tests.rs` targets the API from `SPEC.md` and does not yet
+compile against the current library, so use `--lib` (or `cargo build`) for now
+rather than a bare `cargo test`.
 
 ---
 

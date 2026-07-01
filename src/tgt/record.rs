@@ -80,6 +80,16 @@ impl TgtRecord {
         let tag_bp = self.tags.len() * 32;
         tag_bp as f64 / self.total_length as f64
     }
+
+    /// Number of distinct enzymes represented among this record's tags.
+    pub fn enzyme_count(&self) -> usize {
+        use std::collections::HashSet;
+        self.tags
+            .iter()
+            .map(|t| t.enzyme)
+            .collect::<HashSet<_>>()
+            .len()
+    }
 }
 
 impl fmt::Display for TgtRecord {
