@@ -227,26 +227,25 @@ fn test_binary_roundtrip() {
     use bsyn::enzyme::EnzymeType;
     use bsyn::tgt::{Strand, Tag, TgtRecord};
     use bsyn::tgt::{TgtReader, TgtWriter};
-    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
-    // Create a test record
+    // Create a test record with contig names
     let mut record = TgtRecord::new("test_genome", 10000);
     record.add_tag(Tag::new([b'A'; 32], 100, EnzymeType::BcgI, Strand::Forward, 0));
     record.add_tag(Tag::new([b'C'; 32], 1500, EnzymeType::AlfI, Strand::Reverse, 0));
     record.add_tag(Tag::new([b'G'; 32], 3000, EnzymeType::BaeI, Strand::Forward, 0));
+    record.contig_names = vec!["NC_000913".to_string(), "plasmid_p".to_string()];
 
     // Write binary
     let tmpfile = NamedTempFile::new().unwrap();
-    let path = tmpfile.path().to_path_buf();
     {
-        let mut writer = TgtWriter::new(&path).unwrap();
+        let mut writer = TgtWriter::new(tmpfile.path()).unwrap();
         writer.write_binary(&record).unwrap();
         writer.flush().unwrap();
     }
 
     // Read binary back
-    let mut reader = TgtReader::new(&path).unwrap();
+    let mut reader = TgtReader::new(tmpfile.path()).unwrap();
     let read_record = reader.read_binary().unwrap();
 
     assert!(read_record.is_some());
@@ -254,6 +253,7 @@ fn test_binary_roundtrip() {
     assert_eq!(read.genome_id, "test_genome");
     assert_eq!(read.total_length, 10000);
     assert_eq!(read.tag_count(), 3);
+    assert_eq!(read.contig_names, vec!["NC_000913", "plasmid_p"]);
 }
 
 // ---------------------------------------------------------------------------

@@ -84,16 +84,18 @@ impl TgtReader {
         Ok(Some(record))
     }
 
-    /// Read a single TGT record in binary format.
+    /// Read a single TGT record in binary format (v2).
     ///
-    /// Binary format layout (per the spec):
-    /// - Header (32 bytes): magic, version, genome length, tag count, enzyme count
+    /// Binary format v2 layout:
+    /// - Header (48 bytes): magic "TGT\x02", version, genome length, tag count, enzyme count, contig count
+    /// - Genome ID (variable): u16 length + bytes
     /// - Tag table (N x 48 bytes each)
     /// - Gap table ((N-1) x 4 bytes each)
+    /// - Contig name table (variable): for each contig, u16 name_len + name bytes
     ///
     /// Returns `Ok(None)` when EOF is reached (no more records to read).
     pub fn read_binary(&mut self) -> Result<Option<TgtRecord>> {
-        let mut header_buf = [0u8; 32];
+        let mut header_buf = [0u8; 48];
         match self.reader.read_exact(&mut header_buf) {
             Ok(()) => {}
             Err(e) => {
@@ -106,9 +108,15 @@ impl TgtReader {
         }
 
         // Verify magic bytes
-        if &header_buf[0..4] != b"TGT\x01" {
+        if &header_buf[0..4] == b"TGT\x01" {
             bail!(
-                "Invalid binary TGT magic bytes: expected b'TGT\\x01', got {:?}",
+                "Detected obsolete binary TGT v1 format (magic b'TGT\\x01'). \
+                 Please convert to v2 or regenerate with the current toolchain."
+            );
+        }
+        if &header_buf[0..4] != b"TGT\x02" {
+            bail!(
+                "Invalid binary TGT magic bytes: expected b'TGT\\x02', got {:?}",
                 &header_buf[0..4]
             );
         }
@@ -117,8 +125,8 @@ impl TgtReader {
         let version = u32::from_le_bytes([
             header_buf[4], header_buf[5], header_buf[6], header_buf[7],
         ]);
-        if version != 1 {
-            bail!("Unsupported binary TGT version: {} (expected 1)", version);
+        if version != 2 {
+            bail!("Unsupported binary TGT version: {} (expected 2)", version);
         }
 
         // Parse genome length
@@ -133,7 +141,9 @@ impl TgtReader {
         ]);
 
         // Enzyme count is present but not needed for reading (bytes 20..22)
-        // Reserved bytes 22..32 are ignored
+        let contig_count = u16::from_le_bytes([header_buf[22], header_buf[23]]);
+
+        // Reserved bytes 24..48 are ignored
 
         // Read genome_id
         let mut id_len_buf = [0u8; 2];
@@ -215,6 +225,21 @@ impl TgtReader {
                 );
             }
         }
+
+        // Read contig name table
+        for _ in 0..contig_count {
+            let mut name_len_buf = [0u8; 2];
+            self.reader.read_exact(&mut name_len_buf)
+                .context("Failed to read contig name length")?;
+            let name_len = u16::from_le_bytes(name_len_buf) as usize;
+            let mut name_bytes = vec![0u8; name_len];
+            self.reader.read_exact(&mut name_bytes)
+                .context("Failed to read contig name bytes")?;
+            let name = String::from_utf8(name_bytes)
+                .unwrap_or_default();
+            record.contig_names.push(name);
+        }
+        // contig_offsets are not stored in the binary format; leave empty
 
         Ok(Some(record))
     }
@@ -563,5 +588,62 @@ mod tests {
 
         let mut reader = TgtReader::new(&path).unwrap();
         assert!(reader.read_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_read_binary_v2_with_contigs() {
+        use crate::tgt::writer::TgtWriter;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.btgt");
+
+        let mut record = TgtRecord::new("test_genome", 10000);
+        record.add_tag(make_tag("AAAA", 100, EnzymeType::BcgI));
+        record.add_tag(make_tag("TTTT", 600, EnzymeType::AlfI));
+        record.contig_names = vec!["chr1".to_string(), "chr2".to_string()];
+
+        {
+            let mut writer = TgtWriter::new(&path).unwrap();
+            writer.write_binary(&record).unwrap();
+        }
+
+        let mut reader = TgtReader::new(&path).unwrap();
+        let read = reader.read_binary().unwrap().unwrap();
+        assert_eq!(read.genome_id, "test_genome");
+        assert_eq!(read.total_length, 10000);
+        assert_eq!(read.tag_count(), 2);
+        assert_eq!(read.contig_names, vec!["chr1", "chr2"]);
+    }
+
+    #[test]
+    fn test_read_binary_rejects_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.btgt");
+        {
+            let mut f = File::create(&path).unwrap();
+            // Write a 48-byte v1-style header so read_exact succeeds and magic check triggers
+            f.write_all(b"TGT\x01").unwrap();               // magic (4 bytes)
+            f.write_all(&1u32.to_le_bytes()).unwrap();        // version 1 (4 bytes)
+            f.write_all(&10000u64.to_le_bytes()).unwrap();    // genome length (8 bytes)
+            f.write_all(&0u32.to_le_bytes()).unwrap();        // tag count (4 bytes)
+            f.write_all(&0u16.to_le_bytes()).unwrap();        // enzyme count (2 bytes)
+            f.write_all(&0u16.to_le_bytes()).unwrap();        // contig count (2 bytes)
+            f.write_all(&[0u8; 24]).unwrap();                 // reserved (24 bytes)
+            f.write_all(b"TGT\x01").unwrap();
+            f.write_all(&1u32.to_le_bytes()).unwrap(); // version 1
+            f.write_all(&10000u64.to_le_bytes()).unwrap(); // genome length
+            f.write_all(&0u32.to_le_bytes()).unwrap(); // tag count
+            f.write_all(&0u16.to_le_bytes()).unwrap(); // enzyme count
+            f.write_all(&[0u8; 10]).unwrap(); // reserved
+        }
+
+        let mut reader = TgtReader::new(&path).unwrap();
+        let result = reader.read_binary();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("obsolete") || err_msg.contains("v1"),
+            "Error should mention obsolete v1 format, got: {}", err_msg
+        );
     }
 }
