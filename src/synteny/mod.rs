@@ -27,6 +27,6 @@ pub use blocks::{
 };
 pub use graph::{AdjacencyEdge, TagAdjacencyGraph, TagNode};
 pub use scoring::{
-    adjacency_jaccard, breakpoint_count, kendall_tag_order, pairwise_synteny_matrix,
+    adjacency_jaccard, breakpoint_count, kendall_tag_order, pairwise_synteny_matrix, position_correlation, windowed_position_correlation, windowed_density_correlation, hamming_distance, count_approximate_common_tags, windowed_synteny_score, windowed_synteny_score_approx,
     synteny_score,
 };

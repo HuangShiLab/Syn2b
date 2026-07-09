@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "Syn2b"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "clap",
- "parking_lot",
- "rayon",
- "serde",
- "tempfile",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,6 +374,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "syn2b"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "parking_lot",
+ "rayon",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]

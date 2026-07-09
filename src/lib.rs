@@ -1,4 +1,4 @@
-//! 2bSyn — 2bRAD-based Synteny Detection Engine
+//! Syn2b — 2bRAD-based Synteny Detection Engine
 //!
 //! A Rust-based alignment-free synteny detection engine that leverages
 //! Type IIB restriction enzyme tags (2bRAD tags) from up to 16 enzymes

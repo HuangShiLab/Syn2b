@@ -190,19 +190,16 @@ pub fn detect_indels(
     block: &SyntenyBlock,
     graph: &TagAdjacencyGraph,
 ) -> Vec<(String, String, i64)> {
-    // Reconstruct the tag path from the block
     let path = reconstruct_block_path(block, graph);
     if path.len() < 2 {
         return Vec::new();
     }
 
-    // Collect genome IDs present in the block
     let genome_ids: Vec<String> = block.genome_coords.keys().cloned().collect();
     if genome_ids.len() < 2 {
         return Vec::new();
     }
 
-    // For each adjacent tag pair in the path, compute distances per genome
     let mut indels = Vec::new();
 
     for window in path.windows(2) {
@@ -218,17 +215,15 @@ pub fn detect_indels(
             None => continue,
         };
 
-        // Compute distance for each genome
         let mut distances: HashMap<String, u64> = HashMap::new();
         for genome_id in &genome_ids {
             if let (Some(&(src_pos, _)), Some(&(tgt_pos, _))) =
                 (src_node.positions.get(genome_id), tgt_node.positions.get(genome_id))
             {
-                distances.insert(genome_id.clone(), tgt_pos.saturating_sub(src_pos));
+                distances.insert(genome_id.clone(), if tgt_pos > src_pos { tgt_pos - src_pos } else { src_pos - tgt_pos });
             }
         }
 
-        // Compare all pairs of genomes
         for i in 0..genome_ids.len() {
             for j in (i + 1)..genome_ids.len() {
                 let gi = &genome_ids[i];
@@ -241,12 +236,9 @@ pub fn detect_indels(
                     continue;
                 }
 
-                // Compute relative difference
                 let mean_dist = (di + dj) as f64 / 2.0;
                 let diff = dj as i64 - di as i64;
 
-                // Threshold: report if difference is > 10% of mean distance
-                // and absolute difference is at least 100 bp
                 let threshold = (mean_dist * 0.1).max(100.0);
                 if (diff as f64).abs() >= threshold {
                     indels.push((gi.clone(), gj.clone(), diff));
@@ -255,7 +247,6 @@ pub fn detect_indels(
         }
     }
 
-    // Deduplicate: merge indels between the same genome pair
     dedup_indels(indels)
 }
 
@@ -361,7 +352,7 @@ mod tests {
         let mut seq = [b'A'; 32];
         seq[0] = idx;
         seq[1] = idx.wrapping_add(1);
-        Tag::new(seq, position, enzyme, strand)
+        Tag::new(seq, position, enzyme, strand, 0)
     }
 
     /// Helper: create a record with evenly spaced tags

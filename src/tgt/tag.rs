@@ -12,8 +12,7 @@ pub enum Strand {
 }
 
 impl Strand {
-    /// Encode the strand as a single byte for the binary TGT format
-    /// (0 = forward, 1 = reverse).
+    /// Convert to u8 (0 = Forward, 1 = Reverse)
     pub fn to_u8(&self) -> u8 {
         match self {
             Strand::Forward => 0,
@@ -21,13 +20,9 @@ impl Strand {
         }
     }
 
-    /// Decode a strand from a single byte. Returns `None` for invalid values.
-    pub fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Strand::Forward),
-            1 => Some(Strand::Reverse),
-            _ => None,
-        }
+    /// Convert from u8 (0 = Forward, anything else = Reverse)
+    pub fn from_u8(v: u8) -> Self {
+        if v == 0 { Strand::Forward } else { Strand::Reverse }
     }
 }
 
@@ -40,30 +35,33 @@ impl fmt::Display for Strand {
     }
 }
 
-/// A 32bp 2bRAD tag with position, enzyme, and strand metadata
+/// A 32bp 2bRAD tag with position, enzyme, strand, and contig metadata
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tag {
     pub sequence: [u8; 32],
     pub position: u64,
     pub enzyme: EnzymeType,
     pub strand: Strand,
+    pub contig_id: u16,   // 0 = not specified / single contig; 1+ = index into contig_names
 }
 
 impl Tag {
     /// Create a new Tag
-    pub fn new(sequence: [u8; 32], position: u64, enzyme: EnzymeType, strand: Strand) -> Self {
+    pub fn new(sequence: [u8; 32], position: u64, enzyme: EnzymeType, strand: Strand, contig_id: u16) -> Self {
         Self {
             sequence,
             position,
             enzyme,
             strand,
+            contig_id,
         }
     }
 
-    /// Return sequence as ASCII string
+    /// Return sequence as ASCII string (trims trailing null bytes from fixed 32-byte buffer)
     pub fn sequence_str(&self) -> String {
         self.sequence
             .iter()
+            .take_while(|&&b| b != 0)
             .map(|&b| b as char)
             .collect()
     }
@@ -87,8 +85,8 @@ impl fmt::Display for Tag {
         };
         write!(
             f,
-            "{}@{}{}:{}",
-            seq_str, self.position, strand_char, self.enzyme as u8
+            "{}@{}{}:{}:{}",
+            seq_str, self.position, strand_char, self.enzyme as u8, self.contig_id
         )
     }
 }

@@ -7,7 +7,6 @@
 //! enabling round-trip conversion between text and binary.
 
 use crate::enzyme::enzyme::EnzymeType;
-use crate::tgt::gap::Gap;
 use crate::tgt::record::TgtRecord;
 use crate::tgt::tag::{Strand, Tag};
 use anyhow::{bail, Context, Result};
@@ -53,6 +52,14 @@ impl TgtReader {
         // Parse header: >genome_id|length=NNN
         let (genome_id, total_length) = parse_header(&header_line)?;
         let mut record = TgtRecord::new(&genome_id, total_length);
+
+        // Check for optional contig metadata comment line
+        if let Some(line) = self.peek_line()? {
+            if line.starts_with("#contigs=") {
+                let line = self.read_next_line()?.unwrap();
+                parse_contig_comment(&line, &mut record)?;
+            }
+        }
 
         // Read tag lines until we hit the next header or EOF
         loop {
@@ -128,9 +135,19 @@ impl TgtReader {
         // Enzyme count is present but not needed for reading (bytes 20..22)
         // Reserved bytes 22..32 are ignored
 
-        // Create record — we don't know the genome_id from binary format,
-        // so we use a default empty string. The caller can set it if needed.
-        let mut record = TgtRecord::new("", total_length);
+        // Read genome_id
+        let mut id_len_buf = [0u8; 2];
+        self.reader.read_exact(&mut id_len_buf)
+            .context("Failed to read genome_id length")?;
+        let id_len = u16::from_le_bytes(id_len_buf) as usize;
+        
+        let mut genome_id_bytes = vec![0u8; id_len];
+        self.reader.read_exact(&mut genome_id_bytes)
+            .context("Failed to read genome_id bytes")?;
+        let genome_id = String::from_utf8(genome_id_bytes)
+            .unwrap_or_default();
+        
+        let mut record = TgtRecord::new(&genome_id, total_length);
 
         // Read tag table
         for _ in 0..tag_count {
@@ -154,12 +171,14 @@ impl TgtReader {
                 .with_context(|| format!("Invalid enzyme index: {}", tag_buf[40]))?;
 
             // Parse strand (byte 41)
-            let strand = Strand::from_u8(tag_buf[41])
-                .with_context(|| format!("Invalid strand value: {}", tag_buf[41]))?;
+            let strand = Strand::from_u8(tag_buf[41]);
 
-            // Reserved bytes 42..48 are ignored
+            // Parse contig_id (bytes 42..44)
+            let contig_id = u16::from_le_bytes([tag_buf[42], tag_buf[43]]);
 
-            let tag = Tag::new(sequence, position, enzyme, strand);
+            // Reserved bytes 44..48 are ignored
+
+            let tag = Tag::new(sequence, position, enzyme, strand, contig_id);
             record.add_tag(tag);
         }
 
@@ -277,64 +296,115 @@ fn parse_header(line: &str) -> Result<(String, u64)> {
     Ok((genome_id, total_length))
 }
 
-/// Parse a tag line of the form `Enzyme:SEQ [-gap- Enzyme:SEQ]*`
+/// Parse a contig metadata comment line of the form `#contigs=name1:len1;name2:len2;...`
+fn parse_contig_comment(line: &str, record: &mut TgtRecord) -> Result<()> {
+    let content = line.trim();
+    if let Some(val) = content.strip_prefix("#contigs=") {
+        let mut offset = 0u64;
+        for part in val.split(';') {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            let mut split = part.splitn(2, ':');
+            let name = split.next().unwrap_or("").trim().to_string();
+            let len = split.next().unwrap_or("0").trim().parse::<u64>().unwrap_or(0);
+            record.contig_names.push(name);
+            record.contig_offsets.push(offset);
+            offset += len;
+        }
+    }
+    Ok(())
+}
+
+/// Parse a tag line of the form `Enzyme:SEQ@POS [-gap- Enzyme:SEQ@POS]*`
 ///
-/// Each tag is prefixed with its enzyme type. Gaps between consecutive tags
-/// are verified against the parsed gap tokens.
+/// Each tag is prefixed with its enzyme type and position. Gaps between
+/// consecutive tags are verified against the parsed gap tokens.
 fn parse_tag_line(line: &str, record: &mut TgtRecord) -> Result<()> {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    // Expected: [Enzyme:SEQ, -NNN-, Enzyme:SEQ, -NNN-, ...]
+    // Expected: [Enzyme:SEQ@POS, -NNN-, Enzyme:SEQ@POS, -NNN-, ...]
 
     let mut i = 0;
+    let mut pending_gap: Option<u32> = None;
+
     while i < tokens.len() {
-        // Each tag token must be of the form "Enzyme:SEQ"
-        let tag_token = tokens[i];
-        let colon_idx = tag_token
-            .find(':')
-            .with_context(|| format!("Expected enzyme prefix (Enzyme:SEQ), got: {}", tag_token))?;
-        let enzyme_name = &tag_token[..colon_idx];
-        let enzyme = parse_enzyme_type(enzyme_name)?;
-        let seq_str = &tag_token[colon_idx + 1..];
-        let sequence = seq_to_bytes(seq_str)?;
-
-        // Compute position: for parsed records, we reconstruct positions from gaps.
-        let position = if record.tags.is_empty() {
-            0
-        } else {
-            let last_pos = record.tags.last().unwrap().position;
-            let last_gap = record.gaps.last().map(|g| g.size as u64).unwrap_or(0);
-            last_pos + last_gap
-        };
-
-        let tag = Tag::new(sequence, position, enzyme, Strand::Forward);
-        record.add_tag(tag);
-
-        i += 1;
-
-        // Check for gap token after this tag
-        if i < tokens.len() {
+        // If current token is a gap, validate the previous gap (if any)
+        if tokens[i].starts_with('-') && tokens[i].ends_with('-') {
             let gap_token = tokens[i];
-            if gap_token.starts_with('-') && gap_token.ends_with('-') {
-                // Parse and validate the gap value
-                let gap_inner = &gap_token[1..gap_token.len() - 1];
-                let parsed_gap: u32 = gap_inner
-                    .parse()
-                    .with_context(|| format!("Invalid gap value: {}", gap_token))?;
+            let gap_inner = &gap_token[1..gap_token.len() - 1];
+            let parsed_gap: u32 = gap_inner
+                .parse()
+                .with_context(|| format!("Invalid gap value: {}", gap_token))?;
 
-                // The gap was already computed by add_tag(). Verify it matches.
-                let gap_idx = record.gaps.len().saturating_sub(1);
-                if gap_idx < record.gaps.len() {
-                    let computed_gap = record.gaps[gap_idx].size;
-                    if computed_gap != parsed_gap {
+            if let Some(expected) = pending_gap.take() {
+                if let Some(last_gap) = record.gaps.last() {
+                    if last_gap.size != expected {
                         bail!(
-                            "Gap mismatch at index {}: computed={}, parsed={}",
-                            gap_idx, computed_gap, parsed_gap
+                            "Gap mismatch at index {}: computed={}, expected={}",
+                            record.gaps.len() - 1, last_gap.size, expected
                         );
                     }
                 }
-                i += 1;
+            }
+            pending_gap = Some(parsed_gap);
+            i += 1;
+            continue;
+        }
+
+        let tag_token = tokens[i];
+
+        // Parse enzyme: "Enzyme:SEQ@POS"
+        let colon_idx = tag_token
+            .find(':')
+            .with_context(|| format!("Expected enzyme prefix (Enzyme:SEQ@POS), got: {}", tag_token))?;
+        let enzyme_name = &tag_token[..colon_idx];
+        let enzyme = parse_enzyme_type(enzyme_name)?;
+
+        // Parse sequence and position: "SEQ@POS"
+        let seq_pos_str = &tag_token[colon_idx + 1..];
+        let at_idx = seq_pos_str
+            .find('@')
+            .with_context(|| format!("Expected position (@POS) in tag token, got: {}", tag_token))?;
+        let seq_str = &seq_pos_str[..at_idx];
+        // Parse sequence and position: "SEQ@POS[:contig_name]"
+        let pos_contig_str = &seq_pos_str[at_idx + 1..];
+        let (pos_str, contig_name) = if let Some(cidx) = pos_contig_str.find(':') {
+            (&pos_contig_str[..cidx], Some(&pos_contig_str[cidx + 1..]))
+        } else {
+            (pos_contig_str, None)
+        };
+        let position: u64 = pos_str
+            .parse()
+            .with_context(|| format!("Invalid position value: {}", tag_token))?;
+        let sequence = seq_to_bytes(seq_str)?;
+
+        // Assign contig_id
+        let contig_id = if let Some(name) = contig_name {
+            if let Some(idx) = record.contig_names.iter().position(|n| n == name) {
+                (idx + 1) as u16
+            } else {
+                record.contig_names.push(name.to_string());
+                record.contig_names.len() as u16
+            }
+        } else {
+            0
+        };
+
+        let tag = Tag::new(sequence, position, enzyme, Strand::Forward, contig_id);
+        record.add_tag(tag);
+
+        // Validate the pending gap (from previous tag) after add_tag computes the gap
+        if let Some(expected) = pending_gap.take() {
+            if let Some(last_gap) = record.gaps.last() {
+                if last_gap.size != expected {
+                    bail!(
+                        "Gap mismatch at index {}: computed={}, expected={}",
+                        record.gaps.len() - 1, last_gap.size, expected
+                    );
+                }
             }
         }
+
+        i += 1;
     }
 
     Ok(())
@@ -393,7 +463,7 @@ mod tests {
     }
 
     fn make_tag(seq: &str, pos: u64, enzyme: EnzymeType) -> Tag {
-        Tag::new(make_seq(seq), pos, enzyme, Strand::Forward)
+        Tag::new(make_seq(seq), pos, enzyme, Strand::Forward, 0)
     }
 
     #[test]
@@ -442,7 +512,7 @@ mod tests {
         {
             let mut f = File::create(&path).unwrap();
             writeln!(f, ">G001|length=10000").unwrap();
-            writeln!(f, "BcgI:ATCG -500- BcgI:GCTA").unwrap();
+            writeln!(f, "BcgI:ATCG@100 -500- BcgI:GCTA@600").unwrap();
         }
 
         let mut reader = TgtReader::new(&path).unwrap();
@@ -452,8 +522,10 @@ mod tests {
         assert_eq!(record.tag_count(), 2);
         assert_eq!(record.tags[0].sequence_str(), "ATCG");
         assert_eq!(record.tags[0].enzyme, EnzymeType::BcgI);
+        assert_eq!(record.tags[0].position, 100);
         assert_eq!(record.tags[1].sequence_str(), "GCTA");
         assert_eq!(record.tags[1].enzyme, EnzymeType::BcgI);
+        assert_eq!(record.tags[1].position, 600);
         assert_eq!(record.gaps.len(), 1);
         assert_eq!(record.gaps[0].size, 500);
     }
@@ -465,9 +537,9 @@ mod tests {
         {
             let mut f = File::create(&path).unwrap();
             writeln!(f, ">G001|length=5000").unwrap();
-            writeln!(f, "BcgI:ATCG -500- BcgI:GCTA").unwrap();
+            writeln!(f, "BcgI:ATCG@100 -500- BcgI:GCTA@600").unwrap();
             writeln!(f, ">G002|length=6000").unwrap();
-            writeln!(f, "AlfI:TTAA -300- AlfI:CCGG").unwrap();
+            writeln!(f, "AlfI:TTAA@200 -300- AlfI:CCGG@500").unwrap();
         }
 
         let mut reader = TgtReader::new(&path).unwrap();

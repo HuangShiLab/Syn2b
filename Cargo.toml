@@ -1,9 +1,9 @@
 [package]
-name = "Syn2b"
+name = "syn2b"
 version = "0.1.0"
 edition = "2021"
-authors = ["2bSyn Contributors"]
-description = "2bRAD-based Synteny Detection Engine"
+authors = ["Syn2b Contributors"]
+description = "Syn2b — 2bRAD-based Synteny Detection Engine"
 license = "MIT"
 
 [dependencies]
@@ -18,9 +18,9 @@ rayon = "1.8"
 tempfile = "3"
 
 [[bin]]
-name = "Syn2b"
+name = "syn2b"
 path = "src/main.rs"
 
 [lib]
-name = "Syn2b"
+name = "bsyn"
 path = "src/lib.rs"

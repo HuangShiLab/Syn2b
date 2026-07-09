@@ -66,6 +66,12 @@ impl TgtWriter {
         // Reserved bytes 22..32 (10 bytes)
         self.writer.write_all(&[0u8; 10])?;
 
+        // --- Genome ID (variable length) ---
+        let genome_id_bytes = record.genome_id.as_bytes();
+        let id_len = genome_id_bytes.len() as u16;
+        self.writer.write_all(&id_len.to_le_bytes())?;
+        self.writer.write_all(genome_id_bytes)?;
+
         // --- Tag Table (N x 48 bytes) ---
         for tag in &record.tags {
             // Sequence: 32 bytes
@@ -80,8 +86,11 @@ impl TgtWriter {
             // Strand: 1 byte (0=FWD, 1=REV)
             self.writer.write_all(&[tag.strand.to_u8()])?; // byte 41
 
-            // Reserved: 6 bytes
-            self.writer.write_all(&[0u8; 6])?; // bytes 42..48
+            // Contig ID: 2 bytes (u16)
+            self.writer.write_all(&tag.contig_id.to_le_bytes())?; // bytes 42..44
+
+            // Reserved: 4 bytes
+            self.writer.write_all(&[0u8; 4])?; // bytes 44..48
         }
 
         // --- Gap Table ((N-1) x 4 bytes) ---
@@ -116,7 +125,7 @@ mod tests {
     }
 
     fn make_tag(seq: &str, pos: u64, enzyme: EnzymeType) -> Tag {
-        Tag::new(make_seq(seq), pos, enzyme, Strand::Forward)
+        Tag::new(make_seq(seq), pos, enzyme, Strand::Forward, 0)
     }
 
     fn make_test_record() -> TgtRecord {
@@ -198,8 +207,8 @@ mod tests {
         let mut buf = Vec::new();
         File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
 
-        // Tag table starts at offset 32
-        let tag0_offset = 32;
+        // Tag table starts after header (32) + genome_id length (2) + genome_id (9)
+        let tag0_offset = 32 + 2 + 9;
 
         // Check first tag sequence (first 4 bytes should be "ATCG")
         assert_eq!(&buf[tag0_offset..tag0_offset + 4], b"ATCG");
@@ -239,8 +248,8 @@ mod tests {
         let mut buf = Vec::new();
         File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
 
-        // Gap table starts after header (32) + tag table (3*48 = 144) = 176
-        let gap_offset = 32 + 3 * 48;
+        // Gap table starts after header (32) + genome_id (2+9) + tag table (3*48 = 144) = 187
+        let gap_offset = 32 + 2 + 9 + 3 * 48;
 
         // Check first gap (1313)
         let gap0 = u32::from_le_bytes([buf[gap_offset], buf[gap_offset + 1], buf[gap_offset + 2], buf[gap_offset + 3]]);

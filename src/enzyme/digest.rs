@@ -2,99 +2,107 @@
 //!
 //! Provides functions to simulate restriction enzyme digestion of genomic
 //! sequences and extract 2bRAD tags.
+//!
+//! Algorithm (based on Fast2bRAD-M / 2bRAD-M paper):
+//! For each enzyme, slide a window of `tag_length` across the sequence.
+//! If all anchors in any pattern match within the window, and the window
+//! contains only A/T/C/G bases (no degenerate bases), the window is a valid tag.
 
 use crate::enzyme::enzyme::{Enzyme, EnzymeType};
 use crate::tgt::tag::{Strand, Tag};
 
-/// Find all recognition sites of an enzyme in a DNA sequence.
-fn find_sites(enzyme: &Enzyme, sequence: &[u8]) -> Vec<usize> {
-    let site = enzyme.recognition_site;
-    let mut positions = Vec::new();
-    if site.is_empty() || sequence.len() < site.len() {
-        return positions;
-    }
-    for i in 0..=sequence.len() - site.len() {
-        if matches_site(sequence, i, site) {
-            positions.push(i);
-        }
-    }
-    positions
+// ── Lookup table: only A/T/C/G/a/t/c/g are true ────────────────────────────
+
+const ATCG_TABLE: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'A' as usize] = true; table[b'a' as usize] = true;
+    table[b'T' as usize] = true; table[b't' as usize] = true;
+    table[b'C' as usize] = true; table[b'c' as usize] = true;
+    table[b'G' as usize] = true; table[b'g' as usize] = true;
+    table
+};
+
+#[inline]
+/// Check if all bytes in the window are A/T/C/G (no degenerate bases).
+pub fn is_pure_atcg(window: &[u8]) -> bool {
+    window.iter().all(|&b| ATCG_TABLE[b as usize])
 }
 
-/// Check if the sequence at `offset` matches the recognition site.
-/// Handles degenerate bases in the site (R=A|G, Y=C|T, N=any).
-fn matches_site(seq: &[u8], offset: usize, site: &[u8]) -> bool {
-    for (i, &base) in site.iter().enumerate() {
-        let seq_base = seq[offset + i];
-        let match_ok = match base {
-            b'A' | b'T' | b'G' | b'C' => seq_base == base,
-            b'N' => true,
-            b'R' => seq_base == b'A' || seq_base == b'G',
-            b'Y' => seq_base == b'C' || seq_base == b'T',
-            b'M' => seq_base == b'A' || seq_base == b'C',
-            b'K' => seq_base == b'G' || seq_base == b'T',
-            b'S' => seq_base == b'G' || seq_base == b'C',
-            b'W' => seq_base == b'A' || seq_base == b'T',
-            b'H' => seq_base == b'A' || seq_base == b'C' || seq_base == b'T',
-            b'B' => seq_base == b'C' || seq_base == b'G' || seq_base == b'T',
-            b'V' => seq_base == b'A' || seq_base == b'C' || seq_base == b'G',
-            b'D' => seq_base == b'A' || seq_base == b'G' || seq_base == b'T',
-            _ => false,
-        };
-        if !match_ok {
-            return false;
+// ── Public API ────────────────────────────────────────────────────────────
+
+/// Digest a single contig sequence with cumulative offset and contig_id.
+/// 
+/// `offset` is the cumulative length of all preceding contigs (added to position).
+/// `contig_id` is a 1-based identifier for this contig (0 = not specified).
+pub fn digest_genome_contig(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: u64) -> Vec<Tag> {
+    let props = Enzyme::properties(enzyme);
+    let tag_len = props.tag_length as usize;
+    let mut tags = Vec::new();
+
+    for pattern in props.patterns {
+        for pos in 0..sequence.len() {
+            if pos + tag_len > sequence.len() {
+                break;
+            }
+            let window = &sequence[pos..pos + tag_len];
+            if pattern.matches(window) && is_pure_atcg(window) {
+                let mut tag_seq = [0u8; 32];
+                let copy_len = tag_len.min(32);
+                tag_seq[..copy_len].copy_from_slice(&window[..copy_len]);
+                tags.push(Tag::new(
+                    tag_seq,
+                    offset + pos as u64,
+                    enzyme,
+                    Strand::Forward,
+                    contig_id,
+                ));
+            }
         }
     }
-    true
+
+    tags.sort_by_key(|t| t.position);
+    tags.dedup_by_key(|t| t.position);
+    tags
 }
 
 /// Digest a genome sequence with a single enzyme and extract tags.
 ///
-/// # Arguments
-/// * `sequence` — The genomic DNA sequence (uppercase A/C/G/T bytes)
-/// * `enzyme` — The enzyme type to use for digestion
-///
-/// # Returns
-/// A vector of `Tag` structs, each representing an extracted 2bRAD tag.
+/// For each pattern defined by the enzyme, slides a `tag_length` window
+/// across the sequence. If every anchor in the pattern matches, and the
+/// window contains only A/T/C/G bases, the window is emitted as a `Tag`.
+/// Tags are sorted by position and deduplicated.
 pub fn digest_genome(sequence: &[u8], enzyme: EnzymeType) -> Vec<Tag> {
     let props = Enzyme::properties(enzyme);
-    let sites = find_sites(&props, sequence);
     let tag_len = props.tag_length as usize;
     let mut tags = Vec::new();
 
-    for &site_pos in &sites {
-        // Compute the 5' and 3' cut positions
-        let cut_5 = (site_pos as i64 + props.cut_offset_5 as i64).max(0) as usize;
-        let cut_3 = (site_pos as i64 + props.cut_offset_3 as i64).max(0) as usize;
-
-        if cut_3 <= cut_5 || cut_3 - cut_5 != tag_len {
-            continue;
+    for pattern in props.patterns {
+        for offset in 0..sequence.len() {
+            if offset + tag_len > sequence.len() {
+                break;
+            }
+            let window = &sequence[offset..offset + tag_len];
+            if pattern.matches(window) && is_pure_atcg(window) {
+                let mut tag_seq = [0u8; 32];
+                let copy_len = tag_len.min(32);
+                tag_seq[..copy_len].copy_from_slice(&window[..copy_len]);
+                tags.push(Tag::new(
+                    tag_seq,
+                    offset as u64,
+                    enzyme,
+                    Strand::Forward,
+                    0,
+                ));
+            }
         }
-        if cut_3 > sequence.len() {
-            continue;
-        }
-
-        // Extract the tag sequence between the two cut sites
-        let mut tag_seq = [0u8; 32];
-        let extracted_len = cut_3 - cut_5;
-        if extracted_len <= 32 {
-            tag_seq[..extracted_len].copy_from_slice(&sequence[cut_5..cut_3]);
-        } else {
-            // Shouldn't happen if tag_length matches, but clamp to 32
-            tag_seq.copy_from_slice(&sequence[cut_5..cut_5 + 32]);
-        }
-
-        tags.push(Tag::new(
-            tag_seq,
-            cut_5 as u64,
-            enzyme,
-            Strand::Forward,
-        ));
     }
 
     tags.sort_by_key(|t| t.position);
+    tags.dedup_by_key(|t| t.position);
     tags
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -110,5 +118,48 @@ mod tests {
     fn test_digest_no_sites() {
         let tags = digest_genome(b"ATATATATATATATATATATATATATATAT", EnzymeType::BcgI);
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_digest_bcgI_real_site() {
+        // BcgI: tag_length=32, forward anchors at offset 10=CGA, offset 19=TGC
+        // Build a 32-bp window: 10 A's + CGA + 6 A's + TGC + 10 A's
+        let seq = b"AAAAAAAAAACGAAAAAAATGCAAAAAAAAAA";
+        assert_eq!(seq.len(), 32);
+        let tags = digest_genome(seq, EnzymeType::BcgI);
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].position, 0);
+        // Verify reverse pattern matches reverse-complement sequence
+        let rev_seq = b"TTTTTTTTTTGCATTTTTTTCGTTTTTTTTTT";
+        let tags_rev = digest_genome(rev_seq, EnzymeType::BcgI);
+        assert_eq!(tags_rev.len(), 1);
+    }
+
+    #[test]
+    fn test_digest_bcgI_with_n_rejected() {
+        // Same as above but with an N — should be rejected by is_pure_atcg
+        let seq = b"AAAAAAAAAACGAAAAAAATGCAAAANAAA";
+        let tags = digest_genome(seq, EnzymeType::BcgI);
+        assert!(tags.is_empty(), "N-containing window should be rejected");
+    }
+
+    #[test]
+    fn test_digest_cjeI_correct_site() {
+        // CjeI: tag_length=37, forward anchors at offset 8=CCA, offset 17=GT
+        // Build a 37-bp window: 8 A's + CCA + 6 A's + GT + 18 A's
+        let seq = b"AAAAAAAACCAAAAAAAGTAAAAAAAAAAAAAAAAAA";
+        assert_eq!(seq.len(), 37);
+        let tags = digest_genome(seq, EnzymeType::CjeI);
+        assert_eq!(tags.len(), 1);
+    }
+
+    #[test]
+    fn test_digest_cjePI_correct_site() {
+        // CjePI: tag_length=38, forward anchors at offset 7=CCA, offset 17=TC
+        // Build a 38-bp window: 7 A's + CCA + 7 A's + TC + 19 A's
+        let seq = b"AAAAAAACCAAAAAAAATCAAAAAAAAAAAAAAAAAAA";
+        assert_eq!(seq.len(), 38);
+        let tags = digest_genome(seq, EnzymeType::CjePI);
+        assert_eq!(tags.len(), 1);
     }
 }

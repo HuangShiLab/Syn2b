@@ -3,15 +3,13 @@
 **Syn2b** is a Rust, alignment-free engine for detecting genome synteny and
 structural variation from **2bRAD tags** — the short, fixed-position sequences
 produced by *Type IIB* restriction enzymes. Instead of aligning whole genomes,
-2bSyn represents each genome as an ordered series of sparse anchor tags (the
+Syn2b represents each genome as an ordered series of sparse anchor tags (the
 **Tag–Gap–Tag / TGT** model) and infers synteny from how the *order and
 adjacency* of those tags are conserved across genomes.
 
-> **Status: research prototype.** The crate builds (`cargo build --release`) and
-> its core data structures, TGT I/O, adjacency graph, and scoring metrics are
-> implemented and unit-tested. The command-line pipeline, however, is still a
-> scaffold and the in-silico digestion is not yet complete. See
-> [Project status & roadmap](#project-status--roadmap) before relying on it.
+> **Status: functional prototype.** The core pipeline (digest → TGT → graph →
+> synteny/scaffold) is implemented and tested. Performance optimization is the
+> next priority. See [Project status & roadmap](#project-status--roadmap).
 
 ---
 
@@ -39,7 +37,7 @@ adjacency* of those tags are conserved across genomes.
 ## Motivation
 
 2bRAD-M and related reduced-representation methods profile a microbial genome
-with roughly **1,000–3,000 species-specific 32 bp tags**, each anchored at a
+with roughly **1,000–3,000 species-specific tags** (27–33 bp), each anchored at a
 fixed, restriction-map-determined coordinate. These tags are essentially a very
 sparse, deterministic *minimizer set*: their **relative order is fixed by the
 genome**, so a rearrangement (inversion, translocation, large indel) shows up as
@@ -47,8 +45,8 @@ a change in which tags are adjacent.
 
 Existing synteny tools cannot consume this data directly. SynTracker, for
 example, needs ~5 kb homologous regions with flanking context for BLAST/DECIPHER
-alignment — a 32 bp isolated tag carries neither the length nor the context it
-requires. 2bSyn is a **dedicated method** that works natively on sparse tag
+alignment — a 27 bp isolated tag carries neither the length nor the context it
+requires. Syn2b is a **dedicated method** that works natively on sparse tag
 series, extending 2bRAD-M from purely *taxonomic* profiling toward *strain-level
 structural* comparison.
 
@@ -65,21 +63,25 @@ tag as a graph node and each observed adjacency as an edge.
         │
         │  in silico digestion  (enzyme/digest.rs)
         ▼
-   2bRAD tags  ──────────────►  TGT record  (one per genome)
+   2bRAD tags  ──────────────►  TGT record  (one per genome per enzyme)
         │                        Tag–Gap–Tag: ordered tags + inter-tag gaps
+        │                        + contig_names / contig_offsets / contig_id
         │  text or binary I/O   (tgt/reader.rs, tgt/writer.rs)
         ▼
-   TagAdjacencyGraph            (synteny/graph.rs)
-     • nodes  = unique tag sequences (shared across genomes)
-     • edges  = adjacencies, weighted by #supporting genomes
+   ┌─────────────────┐
+   │  Synteny mode   │          (synteny/graph.rs, synteny/scoring.rs)
+   │  TagAdjacencyGraph           • nodes = unique tag sequences
+   │    • build_edges()           • edges = adjacencies, weighted
+   │    • simplify()    ─────►  Pairwise matrix (Jaccard similarity)
+ │    • linear_paths() ─────►  Synteny backbones
+   └─────────────────┘
         │
-        │  simplify()  → drop low-support edges & isolated nodes
-        │  linear_paths()  → maximal degree-2 chains = synteny backbones
-        ▼
-   Synteny blocks + scores      (synteny/blocks.rs, synteny/scoring.rs)
-     • genomic coordinates per genome
-     • indel detection from gap-size differences
-     • Jaccard / Kendall τ / breakpoint / path scores
+   ┌─────────────────┐
+   │ Scaffold mode   │          (main.rs scaffold subcommand)
+   │  Map draft contigs         • Evaluate fwd/rev orientation
+   │  onto reference            • Sort by median ref position
+   │  via shared tags   ────►  AGP v2.1 output
+   └─────────────────┘
 ```
 
 ---
@@ -87,9 +89,10 @@ tag as a graph node and each observed adjacency as an edge.
 ## Features
 
 - **In silico digestion** with 16 Type IIB restriction enzymes (IUPAC-degenerate
-  recognition sites supported).
+  recognition sites supported: BaeI, HaeIV, Hin4I).
 - **TGT (Tag–Gap–Tag) representation** — a compact, structured genome model of
-  ordered tags plus the base-pair gaps between them.
+  ordered tags plus the base-pair gaps between them. TGT v2 includes contig
+  metadata (`contig_id`, `contig_names`, `contig_offsets`).
 - **Two on-disk formats** — a human-readable text format and a compact,
   fixed-layout binary format, with round-trip conversion.
 - **Streaming FASTA reader** — genomes are parsed record-by-record without
@@ -100,26 +103,28 @@ tag as a graph node and each observed adjacency as an edge.
   adjacency Jaccard, Kendall's τ on tag order, and breakpoint counts.
 - **Synteny blocks & indels** — block extraction with per-genome coordinates,
   size filtering, and indel detection from inter-tag distance differences.
+- **Scaffold subcommand** — map draft genome contigs onto a reference genome
+  using shared 2bRAD tags, with orientation detection and AGP v2.1 output.
 
 ---
 
 ## Repository layout
 
 ```
-Syn2b/
-├── Cargo.toml                  # package / lib / bin all named `Syn2b`
+syn2b/
+├── Cargo.toml
 ├── src/
-│   ├── main.rs                # CLI entry point (clap): digest / synteny / coverage / convert
-│   ├── lib.rs                 # public API re-exports (crate name: `Syn2b`)
+│   ├── main.rs                # CLI entry point (clap): digest / synteny / scaffold / coverage / convert
+│   ├── lib.rs                 # public API re-exports (crate name: `bsyn`)
 │   ├── tgt/                   # TGT core data structures
-│   │   ├── tag.rs             # Tag  (32 bp sequence + position + enzyme + strand)
+│   │   ├── tag.rs             # Tag  (32 bp sequence + position + enzyme + strand + contig_id)
 │   │   ├── gap.rs             # Gap  (inter-tag distance in bp)
-│   │   ├── record.rs          # TgtRecord (one genome: ordered tags + gaps + stats)
-│   │   ├── writer.rs          # TgtWriter (text + binary output)
-│   │   └── reader.rs          # TgtReader (text + binary input)
+│   │   ├── record.rs          # TgtRecord (one genome: ordered tags + gaps + contig metadata)
+│   │   ├── writer.rs          # TgtWriter (text + binary output, v2 format)
+│   │   └── reader.rs          # TgtReader (text + binary input, v2 format)
 │   ├── enzyme/                # Restriction-enzyme definitions
-│   │   ├── enzyme.rs          # EnzymeType (16 variants) + Enzyme properties
-│   │   └── digest.rs          # in silico digestion (recognition-site search + tag extraction)
+│   │   ├── enzyme.rs          # EnzymeType (16 variants) + Enzyme properties + IUPAC matching
+│   │   └── digest.rs          # in silico digestion (pattern matching + tag extraction)
 │   ├── synteny/               # Synteny-detection engine
 │   │   ├── graph.rs           # TagAdjacencyGraph, TagNode, AdjacencyEdge
 │   │   ├── scoring.rs         # synteny_score, pairwise matrix, Jaccard, Kendall τ, breakpoints
@@ -129,9 +134,10 @@ Syn2b/
 │   └── utils/
 │       └── mod.rs             # reverse_complement, is_valid_dna, gc_content
 └── tests/
-    └── integration_tests.rs   # end-to-end tests (see status note below)
+    └── integration_tests.rs   # end-to-end tests (enzyme, TGT, graph, I/O, binary round-trip)
 ```
 
+The library crate is named **`bsyn`** and the binary is **`syn2b`**.
 
 ---
 
@@ -141,14 +147,20 @@ A **TGT record** describes one genome as an ordered list of tags with the gaps
 between them. `gaps[i]` is the distance (bp) between `tags[i]` and `tags[i+1]`,
 so a record with *N* tags has *N − 1* gaps.
 
+TGT v2 adds **multi-contig support**: each tag carries a `contig_id` (u16),
+and the record stores `contig_names` and `contig_offsets` for mapping back to
+FASTA headers.
+
 ### Text format
 
 ```
->NC_000913|length=4641652
+#contigs=NC_000913:4641652;NC_000914:5000000
+>genome_id|length=9641652
 BcgI:ATCG… -1313- GCTA… -1298- TTAA…
 AlfI:CGAT… -892-  AATT… -1567- GCAT…
 ```
 
+- A header comment `#contigs=name:length;...` lists contig names and lengths.
 - A header line `>genome_id|length=<bp>` opens each record.
 - Tag lines are grouped by enzyme; each tag is written as `Enzyme:SEQUENCE`.
 - Gaps appear between consecutive tags as `-<size>-`.
@@ -156,28 +168,33 @@ AlfI:CGAT… -892-  AATT… -1567- GCAT…
 The reader reconstructs tag positions from the cumulative gaps and validates that
 each parsed gap matches the value recomputed from tag positions.
 
-### Binary format
+### Binary format (v2)
 
-A fixed-layout, little-endian binary encoding for efficient storage:
+A fixed-layout, little-endian binary encoding:
 
 ```
-Header (32 bytes)
-  [0..4]    Magic          b"TGT\x01"
-  [4..8]    Version        u32 (= 1)
-  [8..16]   Genome length  u64
-  [16..20]  Tag count      u32
-  [20..22]  Enzyme count   u16
-  [22..32]  Reserved
+Header (48 bytes)
+  [0..4]    Magic           b"TGT\x02"
+  [4..8]    Version         u32 (= 2)
+  [8..16]   Genome length   u64
+  [16..20]  Tag count       u32
+  [20..22]  Enzyme count    u16
+  [22..24]  Contig count    u16
+  [24..48]  Reserved
 
 Tag table (tag_count × 48 bytes)
-  [0..32]   Tag sequence   raw bytes (zero-padded)
-  [32..40]  Position       u64
-  [40..41]  Enzyme index   u8 (0–15)
-  [41..42]  Strand         u8 (0 = forward, 1 = reverse)
-  [42..48]  Reserved
+  [0..32]   Tag sequence    raw bytes (zero-padded)
+  [32..40]  Position        u64
+  [40..41]  Enzyme index    u8 (0–15)
+  [41..42]  Strand          u8 (0 = forward, 1 = reverse)
+  [42..44]  Contig ID       u16
+  [44..48]  Reserved
 
 Gap table ((tag_count − 1) × 4 bytes)
-  [0..4]    Gap size       u32
+  [0..4]    Gap size        u32
+
+Contig name table (variable)
+  For each contig: u16 name_len + name bytes
 ```
 
 On read, the magic bytes and version are verified and the stored gap table is
@@ -188,33 +205,32 @@ cross-checked against gaps recomputed from tag positions.
 ## Type IIB restriction enzymes
 
 Type IIB enzymes cut on **both** sides of their recognition site, excising a
-short, defined fragment — ideal for producing fixed-length 2bRAD tags. 2bSyn
+short, defined fragment — ideal for producing fixed-length 2bRAD tags. Syn2b
 ships definitions for 16 of them (`src/enzyme/enzyme.rs`). Recognition sites use
-IUPAC codes (`N` = any; `R` = A/G; `Y` = C/T; etc.), which the digester matches
-via `matches_site`.
+anchor motifs plus IUPAC constraints (`Y` = C/T; `R` = A/G; `[GAC]` = G/A/C).
 
-| Enzyme  | Recognition site   | Tag length | 5′/3′ cut offset |
-|---------|--------------------|:----------:|:----------------:|
-| BcgI    | `CGANNNNNNTGC`     | 32         | −10 / +10        |
-| AlfI    | `GCANNNNNNTGC`     | 32         | −9 / +9          |
-| AloI    | `GAACNNNNNNTCC`    | 32         | −11 / +11        |
-| BaeI    | `ACNNNNGTAYC`      | 32         | −12 / +12        |
-| BplI    | `GAGNNNNNCTC`      | 32         | −8 / +8          |
-| BsaXI   | `ACNNNNNCTCC`      | 32         | −10 / +10        |
-| BslFI   | `GGGAC`            | 28         | −7 / +7          |
-| Bsp24I  | `GACNNNNNNTGG`     | 32         | −11 / +11        |
-| CjeI    | `RYANNNNNNCTC`     | 32         | −10 / +10        |
-| CjePI   | `GCANNNNNNGTG`     | 32         | −10 / +10        |
-| CspCI   | `CAANNNNNGTGG`     | 32         | −11 / +11        |
-| FalI    | `AAGNNNNNCTT`      | 32         | −9 / +9          |
-| HaeIV   | `GAYNNNNNRTC`      | 32         | −9 / +9          |
-| Hin4I   | `GAYNNNNNVTC`      | 32         | −10 / +10        |
-| PpiI    | `GAACNNNNNCTC`     | 32         | −10 / +10        |
-| PsrI    | `GAACNNNNNNTAC`    | 32         | −11 / +11        |
+| Enzyme  | Tag length | IUPAC degenerate | Notes |
+|---------|:----------:|:----------------:|-------|
+| BcgI    | 32         | —                | Two anchors: CGA @10, TGC @19 |
+| AlfI    | 32         | —                | Palindrome: GCA/TGC |
+| AloI    | 27         | —                | |
+| BaeI    | 28         | Y (fwd), R (rev) | `[CT]` @19 fwd, `[AG]` @8 rev |
+| BplI    | 27         | —                | Palindrome: GAG/CTC |
+| BsaXI   | 27         | —                | |
+| BslFI   | 25         | —                | |
+| Bsp24I  | 27         | —                | |
+| CjeI    | 28         | —                | |
+| CjePI   | 27         | —                | |
+| CspCI   | 33         | —                | |
+| FalI    | 27         | —                | Palindrome: AAG/CTT |
+| HaeIV   | 27         | Y + R            | Y@9+R@15 fwd; Y@11+R@17 rev |
+| Hin4I   | 27         | Y + [GAC]        | Y@10+[GAC]@16 fwd; [CTG]@10+R@16 rev |
+| PpiI    | 27         | —                | |
+| PsrI    | 27         | —                | |
 
-The recognition sites and cut offsets above are the values encoded in the
-source; they are a simplified in-silico model rather than a full biochemical
-specification (see [Project status](#project-status--roadmap)).
+Tag lengths are derived from the 2bRAD-M reference implementation and cross-
+validated against Fast2bRAD-M. The pattern-matching engine supports both exact
+anchor motifs and IUPAC bitmask constraints (bit0=A, bit1=T, bit2=C, bit3=G).
 
 ---
 
@@ -224,14 +240,9 @@ Requires a stable Rust toolchain (Rust 2021 edition; install via
 [rustup](https://rustup.rs)).
 
 ```bash
-cd Syn2b
+cd syn2b
 cargo build --release
 ```
-
-This compiles cleanly (only a couple of dead-code/unused-import warnings) and
-produces the `Syn2b` binary at `target/release/Syn2b`. The Cargo package, the
-library crate, and the binary target are all named `Syn2b` — a package name may
-not start with a digit, which is why the project is not called `2bsyn`.
 
 Dependencies (from `Cargo.toml`): `clap` (CLI), `anyhow` (errors), `serde` +
 `bincode` (serialization), `parking_lot`, and `rayon` (parallelism);
@@ -242,66 +253,84 @@ Dependencies (from `Cargo.toml`): `clap` (CLI), `anyhow` (errors), `serde` +
 ## Command-line usage
 
 ```
-Syn2b <COMMAND> [OPTIONS]
+syn2b <COMMAND> [OPTIONS]
 
 Commands:
-  digest    In silico digest genomes with 2bRAD enzymes
-  synteny   Compute synteny between genomes using TGT
-  coverage  Analyze multi-enzyme coverage statistics
-  convert   Convert between TGT text and binary formats
+  digest     In silico digest genomes with 2bRAD enzymes
+  synteny    Compute synteny between genomes using TGT
+  scaffold   Map draft contigs onto a reference using shared tags
+  coverage   Analyze multi-enzyme coverage statistics
+  convert    Convert between TGT text and binary formats
 ```
 
 Examples:
 
 ```bash
 # Digest a genome with the default enzyme (BcgI) into a text TGT file
-Syn2b digest -i genome.fasta -o genome.tgt
+syn2b digest -i genome.fasta -o genome.tgt
 
 # Digest with all 16 enzymes, writing the compact binary format
-Syn2b digest -i genomes/ -o out/ --enzymes all --format binary
-
-# Multi-enzyme coverage statistics
-Syn2b coverage -i genome.fasta --enzymes all
+syn2b digest -i genome.fasta -o genome.btgt --enzymes all --format binary
 
 # Compute synteny across a set of TGT records
-Syn2b synteny -i tgts/ -o synteny_report.txt
+syn2b synteny -i tgts/ -o synteny_matrix.csv
+
+# Scaffold: map draft contigs onto a reference genome
+syn2b scaffold -r reference.tgt -d draft.tgt -o scaffolds.agp --min-tags 3
+
+# Multi-enzyme coverage statistics
+syn2b coverage -i genome.fasta --enzymes all
 
 # Convert a text TGT to binary (or vice versa)
-Syn2b convert -i genome.tgt -o genome.btgt --format binary
+syn2b convert -i genome.tgt -o genome.btgt --format binary
 ```
 
 Common options: `-i/--input`, `-o/--output`, `-e/--enzymes`
 (comma-separated names or `all`), `-f/--format` (`text` | `binary`).
 
-> The subcommands currently parse and validate their arguments (including the
-> enzyme list) and print what they *would* do — the end-to-end
-> digest→TGT→graph→report orchestration is not yet wired up. The building blocks
-> exist as library functions; see below.
+### Scaffold subcommand
+
+The `scaffold` command maps draft contigs onto a reference genome:
+
+1. Load reference and draft TGT records.
+2. For each draft contig, evaluate forward and reverse-complement orientations
+   by matching tags against the reference.
+3. Use a count-ratio heuristic (>2× difference) to pick the dominant
+   orientation.
+4. Sort contigs by median reference position.
+5. Output AGP v2.1 with real contig lengths and estimated gap sizes.
+
+This has been validated on E. coli K-12 self-scaffold (4 reversed contigs
+correctly identified) and ABHQ draft (135 contigs → 45 anchored at
+`min_tags=3`).
 
 ---
 
 ## Library usage
 
-The crate exposes its functionality as the `Syn2b` library. Representative API:
+The crate exposes its functionality as the `bsyn` library. Representative API:
 
 ```rust
-use Syn2b::enzyme::EnzymeType;
-use Syn2b::enzyme::enzyme::Enzyme;
-use Syn2b::enzyme::digest::digest_genome;
-use Syn2b::tgt::{Tag, Gap, TgtRecord, TgtReader, TgtWriter, Strand};
-use Syn2b::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
+use bsyn::enzyme::EnzymeType;
+use bsyn::enzyme::enzyme::Enzyme;
+use bsyn::enzyme::digest::digest_genome_contig;
+use bsyn::tgt::{Tag, TgtRecord, TgtReader, TgtWriter, Strand};
+use bsyn::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
 use std::path::Path;
 
 // 1. Enzyme properties
-let bcgi = Enzyme::properties(EnzymeType::BcgI);   // recognition_site, tag_length, cut offsets
+let bcgi = Enzyme::properties(EnzymeType::BcgI);
+assert_eq!(bcgi.tag_length, 32);
 assert_eq!(EnzymeType::all().len(), 16);
 
-// 2. In silico digestion → tags
-let tags = digest_genome(b"CGA......TGC...", EnzymeType::BcgI);
+// 2. In silico digestion → tags (multi-contig aware)
+let tags = digest_genome_contig(b"CGA......TGC...", EnzymeType::BcgI, 1, 0);
 
-// 3. Assemble a TGT record (gaps are auto-computed from positions)
+// 3. Assemble a TGT record (gaps auto-computed from positions)
 let mut rec = TgtRecord::new("genome_a", 4_641_652);
 for t in tags { rec.add_tag(t); }
+rec.contig_names = vec!["NC_000913".to_string()];
+rec.contig_offsets = vec![0];
 println!("tags={}, mean_gap={:.1}", rec.tag_count(), rec.mean_gap());
 
 // 4. Persist / load (text or binary)
@@ -321,17 +350,10 @@ for path in g.linear_paths() {
 let blocks = extract_synteny_blocks(&g);
 ```
 
-`TgtRecord` also offers `median_gap()`, `max_gap()`, `coverage_fraction()`
-(estimated fraction of the genome covered by tag bases), and `enzyme_count()`.
-`Tag` provides `sequence_str()` and `hamming_distance()`; `Strand` provides
-`to_u8()` / `from_u8()` for the binary format. Utilities in `Syn2b::utils` include
+`TgtRecord` also offers `median_gap()`, `max_gap()`, and `coverage_fraction()`
+(estimated fraction of the genome covered by tag bases). `Tag` provides
+`sequence_str()` and `hamming_distance()`. Utilities in `bsyn::utils` include
 `reverse_complement`, `is_valid_dna`, and `gc_content`.
-
-> Note: the `Enzyme::properties(...)` / `TagAdjacencyGraph::new()` signatures
-> above reflect the **current source**. The [SPEC](../SPEC.md) and
-> `tests/integration_tests.rs` describe a slightly different target API
-> (`EnzymeType::properties(&self)`, `TagAdjacencyGraph::new(num_genomes)`,
-> `digest_multi_enzyme`, …) that the library has not fully converged on yet.
 
 ---
 
@@ -340,12 +362,12 @@ let blocks = extract_synteny_blocks(&g);
 Implemented in `src/synteny/graph.rs` and `src/synteny/blocks.rs`:
 
 1. **Graph construction** — each genome's TGT record is ingested with
-   `add_genome`. Identical 32 bp tag sequences are de-duplicated into a single
-   **`TagNode`**, which records `(position, strand)` per genome. `build_edges`
-   then walks each genome's tag order and creates a directed **`AdjacencyEdge`**
-   for every consecutive pair; the edge **weight** is the number of distinct
-   genomes exhibiting that adjacency, and it stores the inter-tag distance per
-   genome.
+   `add_genome`. Identical tag sequences are de-duplicated into a single
+   **`TagNode`**, which records `(position, strand, contig_id)` per genome.
+   `build_edges` then walks each genome's tag order and creates a directed
+   **`AdjacencyEdge`** for every consecutive pair; the edge **weight** is the
+   number of distinct genomes exhibiting that adjacency, and it stores the
+   inter-tag distance per genome.
 
 2. **Simplification** — `simplify(min_weight)` drops edges supported by fewer
    than `min_weight` genomes (noise / unanchored adjacencies), then removes nodes
@@ -381,6 +403,7 @@ From `src/synteny/scoring.rs`:
 | `adjacency_jaccard(rec_a, rec_b)` | two records | 0–1 | Jaccard of adjacent tag-sequence pairs (works without a graph) |
 | `kendall_tag_order(rec_a, rec_b)` | two records | −1–1 | Kendall's τ rank correlation on the order of shared tags |
 | `breakpoint_count(rec_a, rec_b)` | two records | ≥0 | number of adjacencies present in one genome but not the other (symmetric difference) |
+| `windowed_synteny_score(...)` | two records | 0–1 | sliding-window Jaccard + position correlation for local synteny |
 
 `adjacency_jaccard`, `kendall_tag_order`, and `breakpoint_count` operate directly
 on tag *sequences*, so they can compare two `TgtRecord`s without first building a
@@ -392,48 +415,39 @@ graph.
 
 **What is implemented and unit-tested**
 
-- TGT data model: `Tag`, `Gap`, `TgtRecord` (gap statistics, coverage fraction,
-  enzyme count, text `Display`).
-- TGT text I/O (`TgtReader::read_record` / `TgtWriter::write_record`) and the
-  fixed-layout binary I/O (`read_binary` / `write_binary`, incl. `Strand`
-  encode/decode), with gap validation.
+- TGT data model v2: `Tag` (with `contig_id`), `Gap`, `TgtRecord` (with
+  `contig_names`, `contig_offsets`, gap statistics, coverage fraction).
+- TGT text I/O (`TgtReader::read_record` / `TgtWriter::write_record`) and
+  binary I/O (`read_binary` / `write_binary`) with round-trip parsing and gap
+  validation.
 - Streaming FASTA reader (`FastaReader`).
-- Enzyme catalog: 16 `EnzymeType` variants, index round-trips, and per-enzyme
-  `Enzyme::properties`.
+- Enzyme catalog: 16 `EnzymeType` variants with corrected tag lengths
+  (27–33 bp), index round-trips, and IUPAC degenerate base support.
+- In silico digestion: `digest_genome` (single contig) and
+  `digest_genome_contig` (multi-contig with cumulative offset).
 - Tag adjacency graph: ingestion, edge building, simplification, linear-path and
   common-tag extraction (including inversion-break behavior).
 - Synteny blocks, indel detection, size filtering.
-- All scoring metrics.
+- All scoring metrics (Jaccard, Kendall τ, breakpoint count, windowed scores).
+- **Scaffold subcommand**: draft-to-reference contig mapping with orientation
+  detection and AGP v2.1 output.
 - DNA utilities (`reverse_complement`, `is_valid_dna`, `gc_content`).
+- Integration tests: 17 tests covering enzyme catalog, TGT round-trip, binary
+  I/O, digestion, graph creation, FASTA parsing, and CLI help.
 
-**Known gaps**
+**Current priorities**
 
-- **In-silico digestion is incomplete.** The tag window derived from
-  `cut_offset_5`/`cut_offset_3` does not currently match each enzyme's declared
-  `tag_length` (e.g. BcgI's ±10 offsets yield a 20 bp window vs. `tag_length =
-  32`), so `digest_genome` does not yet emit correct-length tags on real
-  sequence. The recognition-site search and IUPAC matching themselves work.
-- **CLI subcommands are scaffolds** — they validate arguments and print intended
-  actions but do not yet run the digest→TGT→graph→report pipeline.
-- **Multi-enzyme digestion** (`digest_multi_enzyme`, `merge_multi_enzyme_tags`)
-  and some type signatures described in [`SPEC.md`](../SPEC.md) / exercised by
-  `tests/integration_tests.rs` are not yet implemented, so the integration-test
-  target does not compile against the current library.
-- **Seven library unit tests fail** for pre-existing reasons unrelated to the
-  build: five test *helpers* overflow `u8` (`i * 100` with `i: u8`) in
-  `scoring.rs` / `graph.rs`, and two text-format assertions compare against
-  `sequence_str()`, which returns the full zero-padded 32-byte array. **58 of 65
-  pass.**
-
-**Roadmap**
-
-1. Fix the digestion window so tag length matches each enzyme definition; validate
-   against the SPEC targets (~1,169 BcgI tags on *E. coli* K-12; ~8.4% combined
-   coverage for 16 enzymes).
-2. Add multi-enzyme digestion and wire the CLI subcommands to the library.
-3. Reconcile the library API with `SPEC.md` / the integration tests, and fix the
-   pre-existing unit-test failures.
-4. Add the structural-decoupling benchmark described below.
+1. **Performance optimization.** The current `digest_genome_contig()` uses
+   O(N × L × P) byte-by-byte scanning. Fast2bRAD-M achieves ~15× speedup via
+   regex `find_at` + rewind for degenerate enzymes. Target: skip-based search
+   (`memchr` for anchor first bytes), parallel per-enzyme digestion with
+   `rayon`, and batch processing with reusable buffers.
+2. **Scale testing.** Validate on larger datasets (GTDB-scale: 732K genomes
+   ≈ 3.7 Tbp). Current naive estimate: ~2–4 months; target with optimization:
+   ~1–2 weeks on a workstation.
+3. **Benchmark against SynTracker APSS.** Implement the full APSS pipeline
+   (BLAST + 5 kb window + bin-wise similarity) for direct comparison, or
+   establish that tag-order correlation is a valid proxy.
 
 ---
 
@@ -443,7 +457,7 @@ A benchmark against the **real SynTracker** (Enav, Paz & Ley, *Nat Biotechnol*
 2024) on **10 complete, single-contig *C. acnes* genomes** (45 pairs) produced a
 sobering, important result:
 
-- The 2bSyn metric that *appears* to validate the approach — **tag-Jaccard**
+- The Syn2b metric that *appears* to validate the approach — **tag-Jaccard**
   (presence/absence), raw *r* = 0.98 vs SynTracker — is **sequence identity in
   disguise**: it is ~indistinguishable from Mash distance (*r* = 0.997), and its
   **partial correlation with SynTracker controlling for Mash collapses to
@@ -476,39 +490,39 @@ show that tag-adjacency tracks the structural change while Mash does not. That i
 the recommended next experiment.
 
 See the top-level repository for the full analyses:
-`SYNTRACKER_vs_2bSyn_COMPLETE_REPORT.md`, `executive_summary.md`, and
-`syntracker_vs_2bsyn_COMPLETE.png`.
+`SYNTRACKER_vs_Syn2b_COMPLETE_REPORT.md`, `executive_summary.md`, and
+`syntracker_vs_syn2b_COMPLETE.png`.
 
 ---
 
 ## Testing
 
 ```bash
-cd Syn2b
-cargo test --lib      # library unit tests
+cd syn2b
+cargo test            # unit + integration tests (78 passed, 0 failed)
+cargo test --release  # optimized tests
+cargo build --release # release build (0 errors, 0 warnings)
 ```
 
-Every library module carries unit tests (enzyme catalog, digestion, TGT text and
-binary I/O with gap validation, FASTA parsing, graph construction / simplification
-/ paths, block extraction / indels, and the scoring metrics). At present **58 of
-65 unit tests pass**; the 7 failures are pre-existing issues unrelated to the
-build fix — mostly `u8` overflow inside test helpers (see
-[Known gaps](#project-status--roadmap)). The higher-level
-`tests/integration_tests.rs` targets the API from `SPEC.md` and does not yet
-compile against the current library, so use `--lib` (or `cargo build`) for now
-rather than a bare `cargo test`.
+Every library module carries unit tests (enzyme catalog, digestion, TGT text/binary
+I/O and gap validation, FASTA parsing, graph construction/simplification/
+paths, block extraction/indels, and all scoring metrics).
+`tests/integration_tests.rs` covers end-to-end scenarios including binary
+round-trip and CLI validation.
 
 ---
 
 ## References
 
-- **SPEC:** [`../SPEC.md`](../SPEC.md) — full design specification for 2bSyn.
+- **SPEC:** [`../SPEC.md`](../SPEC.md) — full design specification for Syn2b.
 - **ntSynt** — minimizer-graph synteny detection (inspiration for the tag
   adjacency graph).
 - **KmerAperture** (2024) — ordered k-mer series for structural variation.
 - **SynTracker** — Enav, Paz & Ley, *Nature Biotechnology*, 2024 (validation
   reference / gold standard).
 - **2bRAD-M** — reduced-representation microbial profiling (source of the tags).
+- **Fast2bRAD-M** — high-performance 2bRAD tag extraction (reference for tag
+  lengths and recognition-site definitions).
 
 ---
 

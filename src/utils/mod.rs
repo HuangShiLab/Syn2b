@@ -1,4 +1,4 @@
-//! Utility functions for 2bSyn
+//! Utility functions for Syn2b
 
 /// Reverse complement of a DNA sequence
 pub fn reverse_complement(seq: &[u8]) -> Vec<u8> {
