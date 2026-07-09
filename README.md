@@ -311,6 +311,57 @@ correctly identified) and ABHQ draft (135 contigs → 45 anchored at
 The crate exposes its functionality as the `bsyn` library. Representative API:
 
 ```rust
+use bsyn::enzyme::{Enzyme, EnzymeType};
+use bsyn::enzyme::digest::{digest_genome, digest_genome_contig};
+use bsyn::tgt::{Tag, TgtRecord, TgtReader, TgtWriter, Strand};
+use bsyn::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
+use std::path::Path;
+
+// 1. Enzyme properties
+let bcgi = Enzyme::properties(EnzymeType::BcgI);
+assert_eq!(bcgi.tag_length, 32);
+assert_eq!(EnzymeType::all().len(), 16);
+
+// 2. In silico digestion → tags (multi-contig aware)
+// BcgI: 32-bp window, anchors at offset 10 (CGA) and 19 (TGC)
+let seq = b"AAAAAAAAAACGAAAAAAATGCAAAAAAAAAA";
+let tags = digest_genome_contig(seq, EnzymeType::BcgI, 1, 0);
+
+// 3. Assemble a TGT record (gaps auto-computed from positions)
+let mut rec = TgtRecord::new("genome_a", 4_641_652);
+for t in tags { rec.add_tag(t); }
+rec.contig_names = vec!["NC_000913".to_string()];
+rec.contig_offsets = vec![0];
+println!("tags={}, mean_gap={:.1}", rec.tag_count(), rec.mean_gap());
+
+// 4. Persist / load (text or binary)
+{
+    let mut writer = TgtWriter::new(Path::new("genome_a.tgt"))?;
+    writer.write_record(&rec)?;
+}
+let mut reader = TgtReader::new(Path::new("genome_a.tgt"))?;
+while let Some(r) = reader.read_record()? { /* ... */ }
+
+// 5. Build the adjacency graph across genomes and extract synteny
+let mut g = TagAdjacencyGraph::new();
+g.add_genome("genome_a", &rec);
+// g.add_genome("genome_b", &rec_b);  // load another record
+g.build_edges();
+g.simplify(2);                       // keep adjacencies supported by ≥2 genomes
+for path in g.linear_paths() {
+    println!("backbone score = {:.3}", synteny_score(&path, &g));
+}
+let blocks = extract_synteny_blocks(&g);
+```
+
+`TgtRecord` also offers `median_gap()`, `max_gap()`, and `coverage_fraction()`
+(estimated fraction of the genome covered by tag bases). `Tag` provides
+`sequence_str()` and `hamming_distance()`. Utilities in `bsyn::utils` include
+`reverse_complement`, `is_valid_dna`, and `gc_content`.
+
+The crate exposes its functionality as the `bsyn` library. Representative API:
+
+```rust
 use bsyn::enzyme::EnzymeType;
 use bsyn::enzyme::enzyme::Enzyme;
 use bsyn::enzyme::digest::digest_genome_contig;
