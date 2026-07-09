@@ -1,0 +1,10 @@
+genome_label,group,sv_type,sv_size,mash_proxy,syn2b_adjacency_jaccard,syn2b_breakpoint_count
+control_1,control,none,0,0.010101,0.421136,3292
+control_2,control,none,0,0.009924,0.441451,3110
+control_3,control,none,0,0.010156,0.438916,3146
+inversion_50kb,rearranged,inversion,50000,0.010102,0.41012,3334
+inversion_100kb,rearranged,inversion,100000,0.010102,0.401527,3370
+inversion_500kb,rearranged,inversion,500000,0.010102,0.333706,3574
+inversion_1000kb,rearranged,inversion,1000000,0.010102,0.318285,3594
+translocation_100kb,rearranged,translocation,100000,0.010104,0.420636,3296
+translocation_500kb,rearranged,translocation,500000,0.010103,0.420387,3298
