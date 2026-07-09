@@ -28,30 +28,55 @@ pub fn is_pure_atcg(window: &[u8]) -> bool {
     window.iter().all(|&b| ATCG_TABLE[b as usize])
 }
 
-// ── Public API ────────────────────────────────────────────────────────────
+// ── Internal helper ─────────────────────────────────────────────────────────
 
-/// Digest a single contig sequence with cumulative offset and contig_id.
-/// 
-/// `offset` is the cumulative length of all preceding contigs (added to position).
-/// `contig_id` is a 1-based identifier for this contig (0 = not specified).
-pub fn digest_genome_contig(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: u64) -> Vec<Tag> {
+fn digest_sequence(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: u64) -> Vec<Tag> {
     let props = Enzyme::properties(enzyme);
     let tag_len = props.tag_length as usize;
     let mut tags = Vec::new();
 
     for pattern in props.patterns {
-        for pos in 0..sequence.len() {
-            if pos + tag_len > sequence.len() {
-                break;
+        // Find the first anchor (smallest offset) to use as skip-anchor
+        let Some(first_anchor) = pattern.anchors.iter().min_by_key(|a| a.offset) else {
+            // Fallback for patterns with no anchors (shouldn't happen in practice)
+            for pos in 0..sequence.len().saturating_sub(tag_len - 1) {
+                if pos + tag_len > sequence.len() {
+                    break;
+                }
+                let window = &sequence[pos..pos + tag_len];
+                if pattern.matches(window) && is_pure_atcg(window) {
+                    let mut tag_seq = [0u8; 32];
+                    let copy_len = tag_len.min(32);
+                    tag_seq[..copy_len].copy_from_slice(&window[..copy_len]);
+                    tags.push(Tag::new(
+                        tag_seq,
+                        offset + pos as u64,
+                        enzyme,
+                        Strand::Forward,
+                        contig_id,
+                    ));
+                }
             }
-            let window = &sequence[pos..pos + tag_len];
+            continue;
+        };
+
+        let first_byte = first_anchor.motif[0];
+        for candidate_pos in memchr::memchr_iter(first_byte, sequence) {
+            if candidate_pos < first_anchor.offset {
+                continue;
+            }
+            let window_start = candidate_pos - first_anchor.offset;
+            if window_start + tag_len > sequence.len() {
+                continue;
+            }
+            let window = &sequence[window_start..window_start + tag_len];
             if pattern.matches(window) && is_pure_atcg(window) {
                 let mut tag_seq = [0u8; 32];
                 let copy_len = tag_len.min(32);
                 tag_seq[..copy_len].copy_from_slice(&window[..copy_len]);
                 tags.push(Tag::new(
                     tag_seq,
-                    offset + pos as u64,
+                    offset + window_start as u64,
                     enzyme,
                     Strand::Forward,
                     contig_id,
@@ -65,6 +90,16 @@ pub fn digest_genome_contig(sequence: &[u8], enzyme: EnzymeType, contig_id: u16,
     tags
 }
 
+// ── Public API ────────────────────────────────────────────────────────────
+
+/// Digest a single contig sequence with cumulative offset and contig_id.
+/// 
+/// `offset` is the cumulative length of all preceding contigs (added to position).
+/// `contig_id` is a 1-based identifier for this contig (0 = not specified).
+pub fn digest_genome_contig(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: u64) -> Vec<Tag> {
+    digest_sequence(sequence, enzyme, contig_id, offset)
+}
+
 /// Digest a genome sequence with a single enzyme and extract tags.
 ///
 /// For each pattern defined by the enzyme, slides a `tag_length` window
@@ -72,34 +107,7 @@ pub fn digest_genome_contig(sequence: &[u8], enzyme: EnzymeType, contig_id: u16,
 /// window contains only A/T/C/G bases, the window is emitted as a `Tag`.
 /// Tags are sorted by position and deduplicated.
 pub fn digest_genome(sequence: &[u8], enzyme: EnzymeType) -> Vec<Tag> {
-    let props = Enzyme::properties(enzyme);
-    let tag_len = props.tag_length as usize;
-    let mut tags = Vec::new();
-
-    for pattern in props.patterns {
-        for offset in 0..sequence.len() {
-            if offset + tag_len > sequence.len() {
-                break;
-            }
-            let window = &sequence[offset..offset + tag_len];
-            if pattern.matches(window) && is_pure_atcg(window) {
-                let mut tag_seq = [0u8; 32];
-                let copy_len = tag_len.min(32);
-                tag_seq[..copy_len].copy_from_slice(&window[..copy_len]);
-                tags.push(Tag::new(
-                    tag_seq,
-                    offset as u64,
-                    enzyme,
-                    Strand::Forward,
-                    0,
-                ));
-            }
-        }
-    }
-
-    tags.sort_by_key(|t| t.position);
-    tags.dedup_by_key(|t| t.position);
-    tags
+    digest_sequence(sequence, enzyme, 0, 0)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

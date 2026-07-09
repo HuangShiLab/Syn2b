@@ -223,7 +223,12 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<
     while let Some(rec)=r.next_record()?{
         if gid.is_empty(){gid=rec.id.clone();}
         let sl=rec.sequence.len() as u64;tot+=sl;names.push(rec.id.clone());
-        for &e in enzymes{let t=bsyn::enzyme::digest::digest_genome_contig(&rec.sequence,e,cid,off);all_tags.extend(t);}
+        use rayon::prelude::*;
+        let enzyme_tags: Vec<Vec<Tag>> = enzymes
+            .par_iter()
+            .map(|&e| bsyn::enzyme::digest::digest_genome_contig(&rec.sequence, e, cid, off))
+            .collect();
+        for t in enzyme_tags { all_tags.extend(t); }
         off+=sl;cid+=1;
     }
     let mut rec=TgtRecord::new(&gid,tot);
