@@ -39,18 +39,20 @@ impl TgtWriter {
         Ok(())
     }
 
-    /// Write a single TGT record in binary format.
+    /// Write a single TGT record in binary format (v2).
     ///
-    /// Binary format layout:
-    /// - Header (32 bytes): magic "TGT\x01", version, genome length, tag count, enzyme count
-    /// - Tag table (N x 48 bytes each): sequence, position, enzyme index, strand
+    /// Binary format v2 layout:
+    /// - Header (48 bytes): magic "TGT\x02", version, genome length, tag count, enzyme count, contig count
+    /// - Genome ID (variable): u16 length + bytes
+    /// - Tag table (N x 48 bytes each): sequence, position, enzyme index, strand, contig_id
     /// - Gap table ((N-1) x 4 bytes each): gap sizes
+    /// - Contig name table (variable): for each contig, u16 name_len + name bytes
     pub fn write_binary(&mut self, record: &TgtRecord) -> Result<()> {
-        // --- Header (32 bytes) ---
-        let magic = b"TGT\x01";
+        // --- Header (48 bytes) ---
+        let magic = b"TGT\x02";
         self.writer.write_all(magic)?; // bytes 0..4
 
-        let version: u32 = 1;
+        let version: u32 = 2;
         self.writer.write_all(&version.to_le_bytes())?; // bytes 4..8
 
         self.writer
@@ -63,8 +65,12 @@ impl TgtWriter {
         self.writer
             .write_all(&enzyme_count.to_le_bytes())?; // bytes 20..22
 
-        // Reserved bytes 22..32 (10 bytes)
-        self.writer.write_all(&[0u8; 10])?;
+        let contig_count = record.contig_names.len() as u16;
+        self.writer
+            .write_all(&contig_count.to_le_bytes())?; // bytes 22..24
+
+        // Reserved bytes 24..48 (24 bytes)
+        self.writer.write_all(&[0u8; 24])?;
 
         // --- Genome ID (variable length) ---
         let genome_id_bytes = record.genome_id.as_bytes();
@@ -96,6 +102,14 @@ impl TgtWriter {
         // --- Gap Table ((N-1) x 4 bytes) ---
         for gap in &record.gaps {
             self.writer.write_all(&gap.size.to_le_bytes())?;
+        }
+
+        // --- Contig name table (variable) ---
+        for name in &record.contig_names {
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len() as u16;
+            self.writer.write_all(&name_len.to_le_bytes())?;
+            self.writer.write_all(name_bytes)?;
         }
 
         self.writer.flush().context("Failed to flush binary TGT data")?;
@@ -162,7 +176,8 @@ mod tests {
     fn test_write_binary_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.btgt");
-        let record = make_test_record();
+        let mut record = make_test_record();
+        record.contig_names = vec!["NC_000913.3".to_string(), "plasmid_p".to_string()];
 
         {
             let mut writer = TgtWriter::new(&path).unwrap();
@@ -173,10 +188,10 @@ mod tests {
         File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
 
         // Check magic
-        assert_eq!(&buf[0..4], b"TGT\x01");
+        assert_eq!(&buf[0..4], b"TGT\x02");
 
         // Check version
-        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 1);
+        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 2);
 
         // Check genome length
         assert_eq!(
@@ -191,6 +206,9 @@ mod tests {
 
         // Check enzyme count (1)
         assert_eq!(u16::from_le_bytes([buf[20], buf[21]]), 1);
+
+        // Check contig count (2)
+        assert_eq!(u16::from_le_bytes([buf[22], buf[23]]), 2);
     }
 
     #[test]
@@ -207,13 +225,13 @@ mod tests {
         let mut buf = Vec::new();
         File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
 
-        // Tag table starts after header (32) + genome_id length (2) + genome_id (9)
-        let tag0_offset = 32 + 2 + 9;
+        // Tag table starts after header (48) + genome_id length (2) + genome_id (9)
+        let tag0_offset = 48 + 2 + 9;
 
         // Check first tag sequence (first 4 bytes should be "ATCG")
         assert_eq!(&buf[tag0_offset..tag0_offset + 4], b"ATCG");
 
-        // Check first tag position (byte offset 32+32=64)
+        // Check first tag position (byte offset 48+32=80)
         let pos_offset = tag0_offset + 32;
         let pos = u64::from_le_bytes([
             buf[pos_offset],
@@ -227,10 +245,10 @@ mod tests {
         ]);
         assert_eq!(pos, 100);
 
-        // Check enzyme index (byte offset 32+40=72)
+        // Check enzyme index (byte offset 48+40=88)
         assert_eq!(buf[tag0_offset + 40], 0); // BcgI = index 0
 
-        // Check strand (byte offset 32+41=73)
+        // Check strand (byte offset 48+41=89)
         assert_eq!(buf[tag0_offset + 41], 0); // Forward
     }
 
@@ -248,8 +266,8 @@ mod tests {
         let mut buf = Vec::new();
         File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
 
-        // Gap table starts after header (32) + genome_id (2+9) + tag table (3*48 = 144) = 187
-        let gap_offset = 32 + 2 + 9 + 3 * 48;
+        // Gap table starts after header (48) + genome_id (2+9) + tag table (3*48 = 144) = 203
+        let gap_offset = 48 + 2 + 9 + 3 * 48;
 
         // Check first gap (1313)
         let gap0 = u32::from_le_bytes([buf[gap_offset], buf[gap_offset + 1], buf[gap_offset + 2], buf[gap_offset + 3]]);
@@ -258,6 +276,37 @@ mod tests {
         // Check second gap (1298)
         let gap1 = u32::from_le_bytes([buf[gap_offset + 4], buf[gap_offset + 5], buf[gap_offset + 6], buf[gap_offset + 7]]);
         assert_eq!(gap1, 1298);
+    }
+
+    #[test]
+    fn test_write_binary_contig_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.btgt");
+        let mut record = make_test_record();
+        record.contig_names = vec!["chr1".to_string(), "chr2".to_string()];
+
+        {
+            let mut writer = TgtWriter::new(&path).unwrap();
+            writer.write_binary(&record).unwrap();
+        }
+
+        let mut buf = Vec::new();
+        File::open(&path).unwrap().read_to_end(&mut buf).unwrap();
+
+        // Contig name table starts after gap table
+        // header 48 + id_len(2) + id(9) + tag_table(3*48=144) + gap_table(2*4=8) = 211
+        let mut offset = 48 + 2 + 9 + 3 * 48 + 2 * 4;
+
+        // First contig name
+        let name0_len = u16::from_le_bytes([buf[offset], buf[offset + 1]]) as usize;
+        offset += 2;
+        assert_eq!(&buf[offset..offset + name0_len], b"chr1");
+        offset += name0_len;
+
+        // Second contig name
+        let name1_len = u16::from_le_bytes([buf[offset], buf[offset + 1]]) as usize;
+        offset += 2;
+        assert_eq!(&buf[offset..offset + name1_len], b"chr2");
     }
 
     #[test]
