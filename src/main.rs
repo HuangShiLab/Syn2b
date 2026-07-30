@@ -127,7 +127,7 @@ fn run_scaffold(ref_path:&PathBuf,draft_path:&PathBuf,out_path:&PathBuf,min_tags
 fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     use std::io::Write;
     use bsyn::synteny::graph::TagAdjacencyGraph;
-    use bsyn::synteny::scoring::pairwise_synteny_matrix;
+    use bsyn::synteny::scoring::{pairwise_synteny_matrix, structural_synteny};
     use bsyn::tgt::TgtReader;
 
     // Collect all .tgt files from input directory
@@ -153,14 +153,26 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     // Build graph
     let mut graph = TagAdjacencyGraph::new();
     let mut genome_ids = Vec::new();
+    // Records are retained so the structural metric can work on tag order
+    // directly. The graph collapses genomes that share an id, which silently
+    // yields a meaningless score, so duplicates are rejected instead.
+    let mut records = Vec::new();
 
     for path in &tgt_files {
         let mut reader = TgtReader::new(path)?;
         while let Some(record) = reader.read_record()? {
             let genome_id = record.genome_id.clone();
+            if genome_ids.contains(&genome_id) {
+                anyhow::bail!(
+                    "duplicate genome id {:?}: two genomes sharing an id collapse into \
+                     one node set and produce a meaningless score. Rename one.",
+                    genome_id
+                );
+            }
             println!("  Adding genome: {} ({} tags)", genome_id, record.tags.len());
             graph.add_genome(&genome_id, &record);
             genome_ids.push(genome_id);
+            records.push(record);
         }
     }
 
@@ -174,15 +186,30 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     // Write output
     let mut f = std::fs::File::create(output_path)?;
     writeln!(f, "# Syn2b Pairwise Synteny Matrix")?;
-    writeln!(f, "# Format: genome_A,genome_B,jaccard_similarity")?;
-    writeln!(f, "# {}", "-".repeat(60))?;
+    writeln!(f, "# structural = canonical tags, shared-tag restricted, ordered")?;
+    writeln!(f, "#   adjacency. Invariant to substitution-driven tag loss.")?;
+    writeln!(f, "# legacy_adjacency = the previous metric: all consecutive tags,")?;
+    writeln!(f, "#   unordered pairs, no canonicalisation. Dominated by")?;
+    writeln!(f, "#   substitution load rather than structure; kept for comparison.")?;
+    writeln!(
+        f,
+        "genome_A,genome_B,structural,breakpoints,breakpoint_density,shared_tags,repeats_dropped,legacy_adjacency"
+    )?;
 
     for i in 0..genome_ids.len() {
         for j in (i + 1)..genome_ids.len() {
             let gi = &genome_ids[i];
             let gj = &genome_ids[j];
-            let score = matrix.get(&(gi.clone(), gj.clone())).unwrap_or(&0.0);
-            writeln!(f, "{},{},{:.4}", gi, gj, score)?;
+            let legacy = matrix.get(&(gi.clone(), gj.clone())).unwrap_or(&0.0);
+            match structural_synteny(&records[i], &records[j]) {
+                Some(r) => writeln!(
+                    f,
+                    "{},{},{:.4},{},{:.5},{},{},{:.4}",
+                    gi, gj, r.score, r.breakpoints, r.breakpoint_density, r.shared_tags,
+                    r.repeats_dropped, legacy
+                )?,
+                None => writeln!(f, "{},{},NA,NA,NA,0,0,{:.4}", gi, gj, legacy)?,
+            }
         }
     }
 
