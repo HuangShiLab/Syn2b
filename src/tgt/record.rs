@@ -144,6 +144,10 @@ impl fmt::Display for TgtRecord {
             } else {
                 write!(f, "{}:{}@{}", tag.enzyme, tag.sequence_str(), tag.position)?;
             }
+            // Recognition-site orientation. Written last so that readers which
+            // predate this field can ignore it, and so that a contig name
+            // containing '/' cannot be confused with the suffix.
+            write!(f, "/{}", tag.strand)?;
         }
         writeln!(f)?;
         Ok(())

@@ -192,6 +192,10 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     writeln!(f, "#   to use; junction coordinates are written alongside.")?;
     writeln!(f, "# scj_distance = symmetric difference of the adjacency sets, the")?;
     writeln!(f, "#   single-cut-or-join distance; twice breakpoints when circular.")?;
+    writeln!(f, "# inverted_fraction = shared landmarks whose orientation differs,")?;
+    writeln!(f, "#   over the orientation-informative ones. Measures how much of")?;
+    writeln!(f, "#   the genome moved; breakpoints measures how often. A fraction,")?;
+    writeln!(f, "#   so it is comparable with alignment-based synteny measures.")?;
     writeln!(f, "# structural = conserved adjacencies over their union. Kept for")?;
     writeln!(f, "#   continuity, but it divides a discrete event by the landmark")?;
     writeln!(f, "#   count, so one inversion moves it by ~0.001.")?;
@@ -199,7 +203,8 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     writeln!(f, "#   canonicalisation. Dominated by substitution load, not structure.")?;
     writeln!(
         f,
-        "genome_A,genome_B,breakpoints,scj_distance,breakpoint_density,structural,\
+        "genome_A,genome_B,breakpoints,scj_distance,breakpoint_density,\
+inverted_fraction,orientation_mismatches,orientation_uninformative,structural,\
 shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
     )?;
 
@@ -218,8 +223,10 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
                 Some(r) => {
                     writeln!(
                         f,
-                        "{},{},{},{},{:.5},{:.4},{},{},{},{},{:.4}",
-                        gi, gj, r.breakpoints, r.scj_distance, r.breakpoint_density, r.score,
+                        "{},{},{},{},{:.5},{:.5},{},{},{:.4},{},{},{},{},{:.4}",
+                        gi, gj, r.breakpoints, r.scj_distance, r.breakpoint_density,
+                        r.inverted_fraction, r.orientation_mismatches,
+                        r.orientation_uninformative, r.score,
                         r.shared_tags, r.repeats_dropped, r.landmarks_collapsed, r.circular,
                         legacy
                     )?;
@@ -227,7 +234,11 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
                         writeln!(jf, "{}\t{}\t{}", gi, gj, pos)?;
                     }
                 }
-                None => writeln!(f, "{},{},NA,NA,NA,NA,0,0,0,false,{:.4}", gi, gj, legacy)?,
+                None => writeln!(
+                    f,
+                    "{},{},NA,NA,NA,NA,NA,NA,NA,0,0,0,false,{:.4}",
+                    gi, gj, legacy
+                )?,
             }
         }
     }

@@ -215,13 +215,48 @@ fn pairwise_score(graph: &TagAdjacencyGraph, genome_a: &str, genome_b: &str) -> 
 /// the published single-cut-or-join distance — which counts each junction twice
 /// because every cut destroys one adjacency and creates another.
 ///
+/// # Extent, as opposed to count
+///
+/// The junction count deliberately cannot see how *large* an event is: one
+/// inversion breaks exactly two adjacencies whether it spans 5 kb or 500 kb.
+/// That is a problem when comparing against alignment-based synteny, which
+/// reports a **fraction** of the genome rather than a count of events.
+///
+/// [`StructuralSynteny::inverted_fraction`] supplies the missing axis. The
+/// digester always stores a tag as read off the forward strand, so a locus
+/// inside an inverted segment is stored reverse-complemented; it still matches,
+/// because canonicalisation maps both to one identity, but the bit saying which
+/// of the two forms was stored has flipped. Every landmark inside the inversion
+/// flips and every landmark outside it does not, so counting flips measures how
+/// much of the genome moved while the junction count measures how often.
+///
+/// Measured against a ladder of R exactly-100 kb inversions on E. coli K-12
+/// (R = 1, 2, 3, 5, 8, 12, 20), regressing the reported fraction on the true
+/// inverted base-pair fraction: **slope 1.0072, intercept −0.00073, R² 0.9988**.
+/// The residual is landmark-sampling noise and shrinks as 1/sqrt(landmarks
+/// inside): 12.5% off at R = 1 (68 landmarks), 1.6% at R = 20 (1229).
+///
+/// Flips are counted against the *majority* orientation, so reverse-
+/// complementing a whole assembly — a strand convention, not biology — reads as
+/// 0.0 rather than 1.0. The price is a real identifiability limit: past 50%
+/// inversion the minority frame becomes the majority one and the fraction
+/// saturates. The junction count does not saturate, so the pair still separates
+/// those cases.
+///
 /// # Resolution limit
 ///
-/// An event is invisible unless at least **two** landmarks fall inside it: with
-/// one landmark, the inversion reverse-complements that tag, canonicalisation
-/// maps it back to the same identity, and both flanking adjacencies are
-/// unchanged. Measured 95%-detection sizes: ~8 kb for BcgI alone, ~4 kb for the
-/// four-enzyme panel. This is a sampling limit, not an implementation defect.
+/// An event is invisible to the *junction* count unless at least **two**
+/// landmarks fall inside it: with one landmark, the inversion
+/// reverse-complements that tag, canonicalisation maps it back to the same
+/// identity, and both flanking adjacencies are unchanged. Measured
+/// 95%-detection sizes: ~8 kb for BcgI alone, ~4 kb for the four-enzyme panel.
+/// This is a sampling limit, not an implementation defect. Note that the
+/// orientation signal has a *lower* floor — a single landmark inside an
+/// inversion still flips — at the cost of not localising the event.
+///
+/// A tag that is its own reverse complement reads the same in both orientations
+/// and is counted in [`StructuralSynteny::orientation_uninformative`] rather
+/// than silently dropped. On E. coli K-12 with BcgI there are none.
 ///
 /// Returns `None` when fewer than two tags are shared, since no adjacency exists
 /// to compare.
@@ -233,8 +268,18 @@ fn pairwise_score(graph: &TagAdjacencyGraph, genome_a: &str, genome_b: &str) -> 
 /// locus. Single-enzyme panels have uniform tag length and are unaffected.
 const MIN_TAG_SEPARATION: u64 = 40;
 
-/// One landmark: canonical sequence, start position, contig.
-type Landmark = ([u8; 32], u64, u16);
+/// One landmark: a tag reduced to what the order metric needs, plus the
+/// orientation bit that the canonical form would otherwise hide.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Landmark {
+    seq: [u8; 32],
+    pos: u64,
+    contig: u16,
+    /// The stored forward-strand window is the reverse complement of `seq`.
+    rc: bool,
+    /// The tag is its own reverse complement, so `rc` is uninformative here.
+    palindromic: bool,
+}
 
 /// An adjacency, keyed so that {a, b} and {b, a} are the same entry.
 type Adjacency = ([u8; 32], [u8; 32]);
@@ -247,25 +292,49 @@ fn undirected(a: [u8; 32], b: [u8; 32]) -> Adjacency {
     }
 }
 
-/// Landmarks in genome order, with overlapping cut sites collapsed to the first
-/// of each run. Sorting is defensive: callers should not have to guarantee it.
+/// Landmarks in genome order, with overlapping cut sites collapsed to one
+/// representative per run. Sorting is defensive: callers should not have to
+/// guarantee it.
 fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
     let mut all: Vec<Landmark> = record
         .tags
         .iter()
-        .map(|t| (t.canonical_sequence(), t.position, t.contig_id))
+        .map(|t| Landmark {
+            seq: t.canonical_sequence(),
+            pos: t.position,
+            contig: t.contig_id,
+            rc: t.is_revcomp_of_canonical(),
+            palindromic: t.is_palindromic(),
+        })
         .collect();
-    all.sort_by_key(|&(_, pos, contig)| (contig, pos));
+    all.sort_by_key(|lm| (lm.contig, lm.pos));
 
+    // Group into runs of landmarks that chain together within MIN_TAG_SEPARATION,
+    // then keep one representative per run. Two choices here have to be made
+    // reverse-complement symmetric, or the same locus yields different survivors
+    // in a genome and its complement and the two stop matching:
+    //   - chain against the *previous* landmark, not the run's first, because
+    //     reversing the coordinate order reverses which end the run starts from;
+    //   - pick the representative by smallest canonical sequence, not by
+    //     position, because the run's canonical set is reversal-invariant while
+    //     its order is not.
+    // Keeping the first by position instead cost 64 of 2807 shared landmarks
+    // (2.3%) on an E. coli K-12 genome-versus-its-own-reverse-complement control.
     let mut kept: Vec<Landmark> = Vec::with_capacity(all.len());
-    for lm in all {
-        let overlaps = matches!(
-            kept.last(),
-            Some(&(_, prev_pos, prev_contig))
-                if prev_contig == lm.2 && lm.1.saturating_sub(prev_pos) < MIN_TAG_SEPARATION
-        );
-        if !overlaps {
-            kept.push(lm);
+    let mut run_start = 0usize;
+    for i in 0..=all.len() {
+        let breaks = i == all.len()
+            || i == run_start
+            || all[i].contig != all[i - 1].contig
+            || all[i].pos.saturating_sub(all[i - 1].pos) >= MIN_TAG_SEPARATION;
+        if breaks && i > run_start {
+            let rep = all[run_start..i]
+                .iter()
+                .min_by(|x, y| x.seq.cmp(&y.seq))
+                .copied()
+                .expect("non-empty run");
+            kept.push(rep);
+            run_start = i;
         }
     }
     kept
@@ -276,14 +345,14 @@ fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
 fn adjacency_set(series: &[Landmark], circular: bool) -> HashMap<Adjacency, u64> {
     let mut adj = HashMap::with_capacity(series.len());
     for w in series.windows(2) {
-        if w[0].2 != w[1].2 {
+        if w[0].contig != w[1].contig {
             continue; // consecutive in the file, but on different contigs
         }
-        adj.insert(undirected(w[0].0, w[1].0), w[0].1);
+        adj.insert(undirected(w[0].seq, w[1].seq), w[0].pos);
     }
     if circular && series.len() >= 3 {
         let last = series[series.len() - 1];
-        adj.insert(undirected(last.0, series[0].0), last.1);
+        adj.insert(undirected(last.seq, series[0].seq), last.pos);
     }
     adj
 }
@@ -293,7 +362,7 @@ fn adjacency_set(series: &[Landmark], circular: bool) -> HashMap<Adjacency, u64>
 fn single_contig(series: &[Landmark]) -> bool {
     match series.first() {
         None => false,
-        Some(&(_, _, c)) => series.iter().all(|lm| lm.2 == c),
+        Some(first) => series.iter().all(|lm| lm.contig == first.contig),
     }
 }
 
@@ -311,8 +380,8 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
     // 63 tag instances or 2.1% of the total, one of them at 11 loci.
     let count = |v: &[Landmark]| -> HashMap<[u8; 32], usize> {
         let mut m = HashMap::new();
-        for (s, _, _) in v {
-            *m.entry(*s).or_insert(0) += 1;
+        for lm in v {
+            *m.entry(lm.seq).or_insert(0) += 1;
         }
         m
     };
@@ -329,8 +398,10 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
     }
 
     // Keep only shared landmarks, preserving each genome's own order.
-    let kept_a: Vec<Landmark> = series_a.into_iter().filter(|l| shared.contains(&l.0)).collect();
-    let kept_b: Vec<Landmark> = series_b.into_iter().filter(|l| shared.contains(&l.0)).collect();
+    let kept_a: Vec<Landmark> =
+        series_a.into_iter().filter(|l| shared.contains(&l.seq)).collect();
+    let kept_b: Vec<Landmark> =
+        series_b.into_iter().filter(|l| shared.contains(&l.seq)).collect();
 
     // Only close the cycle when both genomes are single-contig. Against a draft
     // assembly there is no origin to normalise and the closure would invent an
@@ -346,15 +417,63 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
     let conserved = adj_a.keys().filter(|k| adj_b.contains_key(*k)).count();
     let union = adj_a.len() + adj_b.len() - conserved;
 
-    // A junction is an adjacency of A that B does not conserve. One inversion
-    // produces exactly two; the symmetric difference counts each twice, because
-    // every cut both destroys an adjacency and creates one.
+    // A junction is an adjacency of A that B *contradicts* — not merely one it
+    // fails to show. The difference is the whole behaviour on draft assemblies:
+    // each contig boundary in B hides one adjacency, so calling every absence a
+    // junction would report one spurious junction per contig break, 99 of them
+    // on a 100-contig draft.
+    //
+    // B contradicts {a, b} when it puts something else on both sides of a (or of
+    // b): a landmark with two neighbours in B has no room left for the partner
+    // it has in A. A landmark at a contig end has one neighbour, so the missing
+    // adjacency is unobserved rather than broken, and is not counted.
+    let mut degree_b: HashMap<[u8; 32], u8> = HashMap::with_capacity(adj_b.len());
+    for (x, y) in adj_b.keys() {
+        *degree_b.entry(*x).or_insert(0) += 1;
+        *degree_b.entry(*y).or_insert(0) += 1;
+    }
+    let saturated = |seq: &[u8; 32]| degree_b.get(seq).copied().unwrap_or(0) >= 2;
+
     let mut junctions: Vec<u64> = adj_a
         .iter()
         .filter(|(k, _)| !adj_b.contains_key(*k))
+        .filter(|((x, y), _)| saturated(x) || saturated(y))
         .map(|(_, &pos)| pos)
         .collect();
     junctions.sort_unstable();
+
+    // Orientation. The adjacency metric deliberately cannot see the *extent* of
+    // an event: one inversion breaks exactly two adjacencies whether it spans
+    // 5 kb or 500 kb. The orientation bit supplies what is missing, because
+    // every landmark inside an inversion flips while every landmark outside it
+    // does not. Counting flips therefore measures how much of the genome moved,
+    // and pairs with the junction count, which measures how many times it moved.
+    //
+    // Palindromic tags are its blind spot: they equal their own reverse
+    // complement, so they read the same in both orientations. They are reported
+    // rather than silently dropped, since they bound the signal's resolution.
+    let orient_a: HashMap<[u8; 32], Landmark> =
+        kept_a.iter().map(|lm| (lm.seq, *lm)).collect();
+    let mut orientation_mismatches = 0usize;
+    let mut orientation_uninformative = 0usize;
+    for lm_b in &kept_b {
+        let Some(lm_a) = orient_a.get(&lm_b.seq) else { continue };
+        if lm_a.palindromic || lm_b.palindromic {
+            orientation_uninformative += 1;
+        } else if lm_a.rc != lm_b.rc {
+            orientation_mismatches += 1;
+        }
+    }
+    let informative = kept_b.len().saturating_sub(orientation_uninformative);
+
+    // Reverse-complementing a whole assembly flips every landmark, which is a
+    // strand convention rather than biology. Score against the majority frame,
+    // so "all flipped" reads as zero, exactly as "none flipped" does. The price
+    // is a genuine identifiability limit: a genome inverted over more than half
+    // its length is indistinguishable from its complement, and the fraction
+    // saturates at 0.5. The junction count does not saturate, so the two
+    // together still separate the cases.
+    let minority = orientation_mismatches.min(informative - orientation_mismatches);
 
     Some(StructuralSynteny {
         score: conserved as f64 / union as f64,
@@ -368,6 +487,13 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         // Normalised so genomes of different landmark density stay comparable.
         breakpoint_density: junctions.len() as f64 / shared.len() as f64,
         junctions,
+        orientation_uninformative,
+        inverted_fraction: if informative == 0 {
+            0.0
+        } else {
+            minority as f64 / informative as f64
+        },
+        orientation_mismatches: minority,
     })
 }
 
@@ -382,12 +508,17 @@ pub struct StructuralSynteny {
     /// Landmarks present and unique in both genomes — the basis of the score.
     pub shared_tags: usize,
     pub conserved_adjacencies: usize,
-    /// Junctions: adjacencies of A that B does not conserve. Exactly 2 per
-    /// inversion and 3 per translocation, matching nucmer/SyRI and Syn2bANI's
-    /// `breakpoint_count`. Zero under substitution loads up to at least 5%.
+    /// Junctions: adjacencies of A that B contradicts by placing other
+    /// landmarks on both sides. Exactly 2 per inversion and 3 per translocation,
+    /// matching nucmer/SyRI and Syn2bANI's `breakpoint_count`. Zero under
+    /// substitution loads up to at least 5%, and zero when B is merely a
+    /// fragmented assembly of A.
     pub breakpoints: usize,
     /// Symmetric difference of the two adjacency sets: the single-cut-or-join
-    /// distance, twice [`Self::breakpoints`] when both genomes are circular.
+    /// distance as published, so it is left uncorrected and counts an adjacency
+    /// hidden by a contig break the same as one genuinely broken. It is twice
+    /// [`Self::breakpoints`] for two closed genomes, and larger than that for a
+    /// draft assembly; prefer [`Self::breakpoints`] there.
     pub scj_distance: usize,
     /// Reference positions of the broken adjacencies. This is the output worth
     /// consuming: on E. coli K-12 a 400 kb inversion is localised to within one
@@ -403,6 +534,22 @@ pub struct StructuralSynteny {
     /// Whether both genomes were single-contig and the series were closed into
     /// cycles. When false the comparison is origin-sensitive at the ends.
     pub circular: bool,
+    /// Shared landmarks whose stored window is reverse-complemented in one
+    /// genome relative to the other: the landmarks that lie inside an inverted
+    /// segment. Counted against the majority orientation, so a whole-genome
+    /// reverse complement scores 0. Independent of [`Self::breakpoints`], which
+    /// counts events rather than their extent.
+    pub orientation_mismatches: usize,
+    /// Shared landmarks that are their own reverse complement and so cannot
+    /// report orientation. Reported because they bound the resolution of
+    /// [`Self::orientation_mismatches`].
+    pub orientation_uninformative: usize,
+    /// [`Self::orientation_mismatches`] over the orientation-informative shared
+    /// landmarks: the fraction of the shared genome that sits in inverted
+    /// orientation. This is a fraction, so unlike the junction count it is
+    /// directly comparable with alignment-based synteny measures. Saturates at
+    /// 0.5, since past that point the minority frame becomes the majority one.
+    pub inverted_fraction: f64,
 }
 
 fn genome_order_in_graph(graph: &TagAdjacencyGraph, genome_id: &str) -> Option<Vec<u64>> {
@@ -753,6 +900,135 @@ mod tests {
             r.score
         );
         assert!(r.breakpoints >= 2, "got {} breakpoints", r.breakpoints);
+    }
+
+    // ── Invariance controls ────────────────────────────────────────────────
+    //
+    // Each of these is a transformation that changes nothing biological, so
+    // every one must report exactly zero junctions and zero inverted fraction.
+    // Both this crate and Syn2bANI have shipped metrics that failed at least
+    // one of them, so they are asserted rather than assumed.
+
+    #[test]
+    fn invariance_self_comparison() {
+        let s = seqs(40);
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &s))
+            .expect("identical genomes share every tag");
+        assert_eq!(r.breakpoints, 0);
+        assert_eq!(r.scj_distance, 0);
+        assert_eq!(r.inverted_fraction, 0.0);
+        assert_eq!(r.score, 1.0);
+    }
+
+    #[test]
+    fn invariance_whole_genome_reverse_complement() {
+        // A chromosome read off the other strand is the same chromosome. Every
+        // landmark flips, which is exactly why the fraction is scored against
+        // the majority orientation.
+        let s = seqs(40);
+        let mut rc: Vec<String> = s.iter().map(|x| revcomp(x)).collect();
+        rc.reverse();
+
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &rc))
+            .expect("canonicalisation must keep every tag shared");
+        assert_eq!(r.shared_tags, 40, "reverse complement must not lose tags");
+        assert_eq!(r.breakpoints, 0, "got {} junctions", r.breakpoints);
+        assert_eq!(
+            r.inverted_fraction, 0.0,
+            "a strand convention is not a rearrangement"
+        );
+    }
+
+    #[test]
+    fn invariance_circular_origin_rotation() {
+        // Assemblies of a circular chromosome start at an arbitrary base.
+        let s = seqs(40);
+        let mut rotated = s[13..].to_vec();
+        rotated.extend_from_slice(&s[..13]);
+
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &rotated))
+            .expect("rotation keeps every tag");
+        assert!(r.circular, "single-contig genomes must be closed into cycles");
+        assert_eq!(r.breakpoints, 0, "got {} junctions", r.breakpoints);
+    }
+
+    #[test]
+    fn invariance_fragmented_assembly() {
+        // Splitting one contig into three must not invent junctions across the
+        // breaks, and must not close a cycle that no longer has an origin.
+        let s = seqs(40);
+        let a = record_from("a", &s);
+
+        let mut b = TgtRecord::new("b", 41_000);
+        for (i, seq) in s.iter().enumerate() {
+            let mut buf = [0u8; 32];
+            buf[..seq.len()].copy_from_slice(seq.as_bytes());
+            let contig = (i / 14 + 1) as u16;
+            b.add_tag(Tag::new(
+                buf,
+                (i as u64 + 1) * 1000,
+                EnzymeType::BcgI,
+                Strand::Forward,
+                contig,
+            ));
+        }
+        b.contig_names = vec!["c1".into(), "c2".into(), "c3".into()];
+
+        let r = structural_synteny(&a, &b).expect("fragmentation keeps every tag");
+        assert!(!r.circular, "a multi-contig genome has no origin to normalise");
+        assert_eq!(
+            r.breakpoints, 0,
+            "contig boundaries are missing adjacencies, not broken ones; got {:?}",
+            r.junctions
+        );
+    }
+
+    // ── Orientation signal ─────────────────────────────────────────────────
+
+    #[test]
+    fn orientation_measures_the_extent_of_an_inversion() {
+        // The junction count is blind to how large an event is; the orientation
+        // signal is exactly the missing axis. Two inversions of very different
+        // size must give the same junction count and different fractions.
+        let s = seqs(100);
+
+        let invert = |from: usize, to: usize| -> Vec<String> {
+            let mut v = s.clone();
+            v[from..to].reverse();
+            for x in v[from..to].iter_mut() {
+                *x = revcomp(x);
+            }
+            v
+        };
+
+        let a = record_from("a", &s);
+        let small = structural_synteny(&a, &record_from("small", &invert(20, 30)))
+            .expect("shared");
+        let large = structural_synteny(&a, &record_from("large", &invert(20, 70)))
+            .expect("shared");
+
+        assert_eq!(small.breakpoints, 2, "one inversion is two junctions");
+        assert_eq!(large.breakpoints, 2, "size must not change the count");
+
+        assert_eq!(small.orientation_mismatches, 10, "10 landmarks moved");
+        assert_eq!(large.orientation_mismatches, 50, "50 landmarks moved");
+        assert!((small.inverted_fraction - 0.10).abs() < 1e-9);
+        assert!((large.inverted_fraction - 0.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn orientation_sees_an_inversion_too_small_for_a_junction() {
+        // A single landmark inside an inversion leaves both flanking
+        // adjacencies intact, so the junction count reads zero. The orientation
+        // bit still flips, which is why the two signals have different floors.
+        let s = seqs(40);
+        let mut v = s.clone();
+        v[17] = revcomp(&v[17]);
+
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &v))
+            .expect("shared");
+        assert_eq!(r.breakpoints, 0, "below the junction resolution limit");
+        assert_eq!(r.orientation_mismatches, 1, "but the orientation bit flips");
     }
 
     /// The two signals must be separable: the inversion's cost must not depend on

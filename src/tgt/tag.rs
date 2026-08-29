@@ -92,6 +92,17 @@ impl Tag {
     /// measures.
     pub fn canonical_sequence(&self) -> [u8; 32] {
         let n = self.seq_len();
+        let rc = self.revcomp_sequence();
+        if rc[..n] < self.sequence[..n] {
+            rc
+        } else {
+            self.sequence
+        }
+    }
+
+    /// Reverse complement of the stored sequence, in the same zero-padded buffer.
+    pub fn revcomp_sequence(&self) -> [u8; 32] {
+        let n = self.seq_len();
         let mut rc = [0u8; 32];
         for i in 0..n {
             rc[n - 1 - i] = match self.sequence[i] {
@@ -102,11 +113,28 @@ impl Tag {
                 other => other,
             };
         }
-        if rc[..n] < self.sequence[..n] {
-            rc
-        } else {
-            self.sequence
-        }
+        rc
+    }
+
+    /// True when the stored window is the reverse complement of its canonical
+    /// representative — the bit that flips when this locus is inverted.
+    ///
+    /// The digester always stores the window as read off the forward strand of
+    /// the assembly, so if a locus is inverted between two genomes the two
+    /// stored sequences are reverse complements, they share a canonical form
+    /// (and so still match), and exactly one of them reports `true` here. That
+    /// makes this an inversion indicator that survives canonicalisation.
+    pub fn is_revcomp_of_canonical(&self) -> bool {
+        let n = self.seq_len();
+        self.revcomp_sequence()[..n] < self.sequence[..n]
+    }
+
+    /// True when the tag is its own reverse complement, so
+    /// [`Self::is_revcomp_of_canonical`] is `false` in every genome and the
+    /// landmark cannot report orientation at all.
+    pub fn is_palindromic(&self) -> bool {
+        let n = self.seq_len();
+        n > 0 && self.revcomp_sequence()[..n] == self.sequence[..n]
     }
 
     /// Hamming distance between two tag sequences

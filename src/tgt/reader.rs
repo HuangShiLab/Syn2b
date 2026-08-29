@@ -340,7 +340,7 @@ fn parse_contig_comment(line: &str, record: &mut TgtRecord) -> Result<()> {
     Ok(())
 }
 
-/// Parse a tag line of the form `Enzyme:SEQ@POS [-gap- Enzyme:SEQ@POS]*`
+/// Parse a tag line of the form `Enzyme:SEQ@POS[:contig][/strand] [-gap- ...]*`
 ///
 /// Each tag is prefixed with its enzyme type and position. Gaps between
 /// consecutive tags are verified against the parsed gap tokens.
@@ -375,7 +375,15 @@ fn parse_tag_line(line: &str, record: &mut TgtRecord) -> Result<()> {
             continue;
         }
 
-        let tag_token = tokens[i];
+        // Strip the optional trailing strand suffix ("/+" or "/-"). Files written
+        // before the field existed simply lack it and default to Forward, so old
+        // .tgt files still parse. Only a one-character "+"/"-" suffix is accepted,
+        // which keeps contig names containing '/' unambiguous.
+        let (tag_token, strand) = match tokens[i].rsplit_once('/') {
+            Some((head, "+")) => (head, Strand::Forward),
+            Some((head, "-")) => (head, Strand::Reverse),
+            _ => (tokens[i], Strand::Forward),
+        };
 
         // Parse enzyme: "Enzyme:SEQ@POS"
         let colon_idx = tag_token
@@ -414,7 +422,7 @@ fn parse_tag_line(line: &str, record: &mut TgtRecord) -> Result<()> {
             0
         };
 
-        let tag = Tag::new(sequence, position, enzyme, Strand::Forward, contig_id);
+        let tag = Tag::new(sequence, position, enzyme, strand, contig_id);
         record.add_tag(tag);
 
         // Validate the pending gap (from previous tag) after add_tag computes the gap

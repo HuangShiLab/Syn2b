@@ -27,11 +27,20 @@ difference between the two problems:
 | Natural estimand | a rate (substitutions/site) | a **count** (events/genome) |
 | What alignment methods report | ANI (a fraction) | aligned fraction / APSS (a **fraction**) |
 
-So TGT gives a clean unbiased estimator of **event count**, and *not* of the
-**conserved fraction**, unless the event-length distribution is separately
-modelled. Alignment-based synteny reports a fraction. That gap — count → fraction
-— is the whole problem, and §7's `Ĉ_bp` is exactly the right place to attack it.
-Sections 1–4 and 5.1–5.3 are correct. Four specific defects follow.
+So the adjacency metric gives a clean unbiased estimator of **event count**, and
+*not* of the **conserved fraction**. Alignment-based synteny reports a fraction.
+That gap — count → fraction — is the whole problem, and the document is right to
+put its best section (§7) there.
+
+The document's route to closing it is to infer extent from count under an assumed
+event-length distribution. **There is a shorter one**: the orientation of each
+tag relative to its canonical form is a second, independent channel that measures
+inverted extent directly, with no length assumption. It is now implemented and
+validated against exact truth at slope 1.0072, R² 0.9988 (§6). Junctions count
+how *often* the genome moved; orientation measures how *much* of it moved.
+
+Sections 1–4 and 5.1–5.3 are correct. Four specific defects follow, one of which
+(§3) is now fixed.
 
 ---
 
@@ -85,24 +94,38 @@ fraction, or a second enzyme panel with different site density used as a probe).
 `(deletion + divergence-beyond-site-loss)` jointly, and the split requires an
 assumption that must be stated.
 
-## 3. Defect 2 — §6.1's `1 − e^{−μs}` needs strand, which the pipeline destroys
+## 3. Defect 2 — §6.1 needed strand, which the pipeline destroyed *(now fixed)*
 
-§6.1's probability that a segment of length `s` contains ≥1 event is derived
-assuming orientation is observable. It is not, for two independent reasons:
+§6.1's probability that a segment of length `s` contains ≥1 event was derived
+assuming orientation is observable. It was not, for two independent reasons:
 
-1. The TGT **text format does not serialise strand** — the record is
-   (sequence, position, contig).
-2. `structural_synteny()` canonicalises every tag to `min(seq, revcomp)`
-   (`canonical_sequence()`), which erases orientation *by construction*. This is
-   deliberate and correct for the adjacency metric — it is what makes the score
-   invariant to reverse-complementing a whole genome — but it means the §6.1
-   quantity is unobservable in the current pipeline.
+1. The TGT **text format did not serialise strand** — the record was
+   (sequence, position, contig), and the reader hard-coded every tag to
+   `Strand::Forward`, so a text round-trip silently discarded the field.
+2. `structural_synteny()` canonicalises every tag to `min(seq, revcomp)`, which
+   erases orientation *by construction*. This is deliberate and correct for the
+   adjacency metric — it is what makes the score invariant to
+   reverse-complementing a whole genome.
 
-Consequence: §6.1 is not wrong, it is **not yet measurable**. Phase 0 item 0.2
-(add a `strand` field to the text format and derive an orientation-mismatch tag
-count as a *separate* signal, leaving the canonical adjacency metric untouched)
-is the prerequisite. Until then §6.1 should be marked as a proposed signal, not a
-derived result.
+Both are now addressed, and the fix turned out to be more informative than the
+document anticipated:
+
+- The digester previously hard-coded `Strand::Forward` for every tag, so the
+  field was dead metadata occupying a byte of every binary record. It now
+  records which recognition-site orientation actually matched (E. coli K-12,
+  BcgI: 1461 forward sites, 1474 reverse). The text format serialises it as a
+  `/+` or `/-` suffix, which older files simply lack and which defaults to
+  forward, so every existing `.tgt` file still parses.
+- **The inversion signal does not come from that field.** The digester always
+  stores a tag as read off the forward strand of the assembly, so a locus inside
+  an inverted segment is stored reverse-complemented. It still *matches*, because
+  canonicalisation maps both forms to one identity, but the bit saying which of
+  the two forms was stored has flipped. That bit is a function of the sequence
+  alone, so it is recoverable from files written before the format change, and it
+  is defined even for palindromic enzymes like AlfI, where site orientation is
+  not.
+
+The measured consequence is in §6 below.
 
 ## 4. Defect 3 — the chance correction `p₀ = 2/k` would erase the signal it corrects
 
@@ -151,21 +174,58 @@ of dropped repeat tags — not a binomial CI. `repeats_dropped` and
 
 ---
 
-## 6. What is most valuable in the document: §7
+## 6. §7 asks the right question, but there is now a shorter answer
 
-§7's breakpoint-derived conserved-fraction estimator `Ĉ_bp` is the one section
-that attacks the actual gap identified in §0 — converting a **count** into the
-**fraction** that dnadiff/ANIm and SynTracker-APSS report. It is the only route by
-which TGT numbers become directly comparable to alignment-based synteny, so it
-deserves the effort.
+§7's breakpoint-derived conserved-fraction estimator `Ĉ_bp` is the section that
+attacks the actual gap identified in §0 — turning a **count** into the
+**fraction** that dnadiff/ANIm and SynTracker-APSS report. That is the right
+target. Its route, however, is indirect: mapping `b` events onto a fraction of
+genome requires assuming how long those events typically are, and the document
+assumes a form rather than estimating it.
 
-Its validity, however, rests on an assumed event-length distribution: mapping
-`b` events onto "fraction of genome in conserved blocks" requires knowing how long
-those events typically are. The document assumes a form. That assumption is
-testable and must be tested, not asserted — it is the single highest-value
-experiment in the plan below.
+The orientation channel measures the fraction **directly**, with no
+event-length assumption at all. Every landmark inside an inversion flips and
+every landmark outside it does not, so the flipped share of shared landmarks
+*is* the inverted share of the genome.
 
----
+Measured against a ladder of R exactly-100 kb inversions on E. coli K-12
+MG1655 (R = 1, 2, 3, 5, 8, 12, 20; BcgI; every interval recorded at construction
+time), regressing the reported fraction on the true inverted base-pair fraction:
+
+| R | true bp fraction | reported | ratio | junctions |
+|---|---|---|---|---|
+| 1  | 0.02154 | 0.02423 | 1.125 | 2  |
+| 2  | 0.04309 | 0.04277 | 0.993 | 4  |
+| 3  | 0.06463 | 0.06130 | 0.948 | 6  |
+| 5  | 0.10772 | 0.11083 | 1.029 | 10 |
+| 8  | 0.17235 | 0.17463 | 1.013 | 16 |
+| 12 | 0.25853 | 0.24982 | 0.966 | 24 |
+| 20 | 0.43088 | 0.43799 | 1.016 | 40 |
+
+**slope 1.0072, intercept −0.00073, R² 0.9988.** The residual is landmark-
+sampling noise and shrinks as 1/√(landmarks inside the event): 12.5% off at
+R = 1 (68 landmarks), 1.6% at R = 20 (1229).
+
+So the two channels are complementary and both exact in their own currency:
+**junctions count how often the genome moved; the orientation fraction measures
+how much of it moved.** Together they answer what neither answers alone, and
+they do it without §7's length-distribution assumption.
+
+Two limits, both stated rather than hidden:
+
+- Flips are counted against the **majority** orientation, so reverse-
+  complementing a whole assembly reads as 0.0 rather than 1.0. The price is a
+  genuine identifiability limit: past 50% inversion the minority frame becomes
+  the majority one and the fraction saturates. The junction count does not
+  saturate, so the pair still separates those cases.
+- A tag that is its own reverse complement reads the same in both orientations.
+  These are counted and reported (`orientation_uninformative`) rather than
+  silently dropped. On E. coli K-12 with BcgI there are none.
+
+This does not make §7 worthless — `Ĉ_bp` remains the only route available to a
+method that has counts but no orientation, and it is worth keeping as a baseline
+to measure the orientation channel against. But it is no longer the primary
+route, and the effort budgeted for it in Phase 3 should shrink accordingly.
 
 ## 7. Research plan
 
@@ -183,15 +243,42 @@ experiment in the plan below.
   report `scj_distance` = |A| + |B| − 2|A ∩ B| alongside it.
 - [x] **0.5** Emit junction **coordinates**, not just counts
   (`<out>.junctions.tsv`).
-- [ ] **0.2** Add `strand` to the TGT text format; derive an orientation-mismatch
-  count as a **separate** signal. Prerequisite for §6.1.
+- [x] **0.2** Serialise recognition-site orientation in the text format
+  (`/+`, `/-`; absent in older files and defaulting to forward), make the
+  digester record it instead of hard-coding forward, and add an
+  orientation-mismatch signal derived from the sequence itself. See §6.
 
-### Phase 1 — invariance controls (must pass before any biology claim)
+### Phase 1 — invariance controls *(done; one real bug found)*
 
-Each must return **exactly 0 junctions**, as repo tests:
-self-vs-self; genome vs its reverse-complement; genome vs a fragmented assembly of
-itself; circular genome vs a rotated origin. Both this repo and Syn2bANI have
-failed at least one of these before; they are cheap and they are load-bearing.
+Each transformation changes nothing biological, so each must return exactly 0
+junctions and 0 inverted fraction. All four are now asserted as repo tests and
+verified at genome scale on E. coli K-12 MG1655 (BcgI):
+
+| Control | junctions | inverted_fraction | shared landmarks |
+|---|---|---|---|
+| self vs self | 0 | 0.00000 | 2806 |
+| vs whole-genome reverse complement | 0 | 0.00000 | 2806 |
+| vs 120-contig fragmented assembly | 0 | 0.00000 | 2804 |
+| vs rotated circular origin | 0 | — | (unit test) |
+
+Two defects were found by writing these rather than assuming them:
+
+1. **Fragmentation inflated the junction count by one per contig break** — 119
+   false junctions on a 120-contig draft. The cause is that an absent adjacency
+   was being read as a broken one. A contig boundary *hides* an adjacency; it
+   does not contradict it. A junction now requires positive contradiction: B must
+   place other landmarks on both sides of one of the two partners. `scj_distance`
+   is deliberately left uncorrected, since it is a published distance on
+   adjacency sets, so it still reads 119 there and the two columns agree only for
+   two closed genomes.
+2. **The 40 bp overlap collapse was not reverse-complement symmetric** — it kept
+   the first landmark of each run by position, and reversing the genome reverses
+   which end a run starts from, so a genome and its own complement kept different
+   survivors and stopped matching. That cost 64 of 2807 shared landmarks (2.3%).
+   Runs now chain against the previous landmark rather than the run's first, and
+   the representative is chosen by smallest canonical sequence, which is
+   reversal-invariant. Shared landmarks are now identical (2806) across all three
+   genome-scale controls.
 
 ### Phase 2 — detection power, measured not assumed
 
@@ -201,12 +288,20 @@ Output the **power curve**: P(detected | length, type, panel). This replaces
 §5.4's CI with the quantity that actually governs uncertainty, and it directly
 tests whether the ≈4–8 kb floor derived above is right.
 
-### Phase 3 — test §7's length-distribution assumption
+### Phase 3 — `Ĉ_bp` as a baseline, not the primary route
 
-On the same simulations, where the true conserved fraction is known by
-construction, fit `Ĉ_bp` and measure its bias as the event-length distribution is
-varied (fixed / exponential / heavy-tailed). If `Ĉ_bp` is robust only under one
-family, that is a publishable limitation and must be stated, not buried.
+Now that the orientation channel measures the inverted fraction directly
+(§6, slope 1.0072, R² 0.9988), §7's `Ĉ_bp` is demoted to a comparison baseline.
+On the same simulations, fit both and report where the assumed-length-
+distribution route diverges from the measured one as the distribution is varied
+(fixed / exponential / heavy-tailed). The interesting result is the size of the
+gap, since that gap is what a count-only method has to live with.
+
+The orientation channel's own open question is different and more useful:
+it currently measures inverted extent. Translocated-but-not-inverted segments do
+not flip, so they are counted by junctions and invisible to the fraction. Whether
+a comparable direct measure exists for translocation extent is the next question
+worth attacking.
 
 ### Phase 4 — external comparators on real closed genomes
 

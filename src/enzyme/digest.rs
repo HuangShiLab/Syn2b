@@ -35,7 +35,12 @@ fn digest_sequence(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: 
     let tag_len = props.tag_length as usize;
     let mut tags = Vec::new();
 
-    for pattern in props.patterns {
+    // Pattern index 0 is the forward-strand recognition site; index 1, when
+    // present, is the reverse-strand site found by scanning the forward strand.
+    // Enzymes with a palindromic site define a single pattern and are always
+    // reported as Forward, which is correct: a palindrome has no orientation.
+    for (pattern_idx, pattern) in props.patterns.iter().enumerate() {
+        let site_strand = if pattern_idx == 0 { Strand::Forward } else { Strand::Reverse };
         // Find the first anchor (smallest offset) to use as skip-anchor
         let Some(first_anchor) = pattern.anchors.iter().min_by_key(|a| a.offset) else {
             // Fallback for patterns with no anchors (shouldn't happen in practice)
@@ -52,7 +57,7 @@ fn digest_sequence(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: 
                         tag_seq,
                         offset + pos as u64,
                         enzyme,
-                        Strand::Forward,
+                        site_strand,
                         contig_id,
                     ));
                 }
@@ -78,7 +83,7 @@ fn digest_sequence(sequence: &[u8], enzyme: EnzymeType, contig_id: u16, offset: 
                     tag_seq,
                     offset + window_start as u64,
                     enzyme,
-                    Strand::Forward,
+                    site_strand,
                     contig_id,
                 ));
             }
