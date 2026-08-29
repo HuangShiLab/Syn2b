@@ -121,6 +121,77 @@ quantises. It is systematic and correctable if it ever matters.
 
 ---
 
+## 5b. Fragmentation: why contig count must not normalise the junction count
+
+Draft assemblies raise an obvious question — if a breakpoint count is inflated by
+contig breaks, can `n_contigs` normalise it away? Measured on a fragmentation
+ladder of *E. coli* K-12: the closed reference against the same genome shattered
+into n contigs, once with no rearrangement (truth 0 junctions) and once carrying
+5 real inversions (truth 10).
+
+| n contigs | truth 0: SCJ / junctions | truth 10: SCJ / junctions | junctions/n | SCJ/n |
+|---:|---|---|---:|---:|
+| 1 | — | 20 / **10** | 10.0 | 20.0 |
+| 10 | 9 / **0** | 29 / **10** | 1.0 | 2.90 |
+| 100 | 99 / **0** | 119 / **10** | 0.10 | 1.19 |
+| 200 | 199 / **0** | 217 / **10** | 0.05 | 1.085 |
+| 500 | 492 / **0** | 506 / **7** | 0.014 | 1.012 |
+| 1000 | 926 / **0** | 940 / **4** | 0.004 | 0.940 |
+
+(`SCJ` is the uncorrected symmetric difference — deliberately left as published —
+so it shows what a count without the contradiction rule would report.)
+
+**Normalising by contig count cannot work, for three reasons the table makes
+explicit.**
+
+1. **The contamination is additive, not multiplicative.** `SCJ ≈ b_true + (n−1)`.
+   Dividing by n shrinks the real signal as `1/n` while the artifact term tends
+   to 1, so the normalised statistic converges to the same value regardless of
+   biology: at n = 100 it reads 0.990 with no rearrangement and 1.190 with five
+   inversions; by n = 1000 it is 0.926 versus 0.940. And `junctions/n` gives the
+   *same* five inversions 10.0 on a closed genome and 0.05 on a 200-contig one —
+   a 200× swing from assembly quality alone.
+2. **Even subtraction would not be exact.** The artifact equals `n − 1` only
+   while every contig holds ≥2 landmarks: at n = 500 it is 492, not 499; at
+   n = 1000 it is 926, not 999. The correct subtrahend depends on the contig
+   *length distribution*, not the count.
+3. **The exact fix is cheaper and already applied.** Requiring positive
+   contradiction gives **0 junctions at every n up to 1000** for the null, and
+   exactly **10** for the real signal through n = 300.
+
+### Where contig count does belong: `observable_fraction`
+
+An adjacency of A whose partners are both stranded at contig ends in B can never
+be contradicted, so a junction there is invisible rather than absent. That share
+is now reported as `observable_fraction`, and it has a closed form:
+
+> `observable_fraction ≈ 1 − (n_contigs − 1) / shared_landmarks`
+
+exact to 4 decimals up to n = 300, drifting below the formula past that as
+singleton contigs appear. It is an unbiased predictor of how many true junctions
+survive fragmentation — `10 × observable_fraction` versus the observed count over
+16 ladder points: **mean error −0.31, sd 1.26**, against a binomial sampling sd of
+≈1.5 at a truth of 10.
+
+| n contigs | mean contig | landmarks/contig | observable_fraction | predicted | observed |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 46 kb | 28.0 | 0.965 | 9.6 | 10 |
+| 200 | 23 kb | 14.0 | 0.929 | 9.3 | 10 |
+| 300 | 15 kb | 9.3 | 0.893 | 8.9 | 10 |
+| 500 | 9.3 kb | 5.6 | 0.817 | 8.2 | 7 |
+| 1000 | 4.6 kb | 2.8 | 0.587 | 5.9 | 4 |
+| 2000 | 2.3 kb | 1.4 | 0.288 | 2.9 | 1 |
+
+**Rule of thumb, scale-free in the panel:** recovery is essentially complete while
+contigs hold **≳10 landmarks** each, i.e. contig N50 ≳ 10× the landmark spacing —
+about 17 kb for BcgI on *E. coli*, 8 kb for the four-enzyme panel. A typical
+medium-quality MAG at 200–500 contigs sits right at that boundary, so
+`observable_fraction` should be read before any junction count from a MAG is
+believed. It costs nothing: it is computable from contig count and shared tags
+before the comparison is run.
+
+---
+
 ## 6. Phase 3 — what a count-only estimator pays for its length prior
 
 Any map from a junction count to a genome fraction must supply a mean event

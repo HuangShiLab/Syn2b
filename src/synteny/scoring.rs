@@ -442,6 +442,20 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         .collect();
     junctions.sort_unstable();
 
+    // How much of A's order B is in a position to judge at all. An adjacency
+    // whose partners both sit at contig ends in B can never be contradicted, so
+    // a junction there is invisible rather than absent. This is where contig
+    // count belongs: as the denominator of a power statement, never as a divisor
+    // of the junction count. The contamination from fragmentation is additive
+    // (roughly one hidden adjacency per contig break), so dividing a count by
+    // contig number shrinks the real signal as 1/n while the artifact term tends
+    // to 1 -- the normalised statistic converges to the same value whether or not
+    // the genome is rearranged.
+    let observable = adj_a
+        .keys()
+        .filter(|(x, y)| saturated(x) || saturated(y))
+        .count();
+
     // Orientation. The adjacency metric deliberately cannot see the *extent* of
     // an event: one inversion breaks exactly two adjacencies whether it spans
     // 5 kb or 500 kb. The orientation bit supplies what is missing, because
@@ -488,6 +502,12 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         breakpoint_density: junctions.len() as f64 / shared.len() as f64,
         junctions,
         orientation_uninformative,
+        observable_adjacencies: observable,
+        observable_fraction: if adj_a.is_empty() {
+            0.0
+        } else {
+            observable as f64 / adj_a.len() as f64
+        },
         inverted_fraction: if informative == 0 {
             0.0
         } else {
@@ -534,6 +554,15 @@ pub struct StructuralSynteny {
     /// Whether both genomes were single-contig and the series were closed into
     /// cycles. When false the comparison is origin-sensitive at the ends.
     pub circular: bool,
+    /// Adjacencies of A that B is in a position to contradict — both partners
+    /// are not stranded at contig ends. Junctions can only ever be found here.
+    pub observable_adjacencies: usize,
+    /// [`Self::observable_adjacencies`] over all of A's adjacencies: the share of
+    /// A's order that this comparison can judge. **This is where contig count
+    /// belongs** — as a discount on detection power, never as a divisor of
+    /// [`Self::breakpoints`]. Expect to recover roughly this fraction of the true
+    /// junctions; 1.0 for two closed genomes.
+    pub observable_fraction: f64,
     /// Shared landmarks whose stored window is reverse-complemented in one
     /// genome relative to the other: the landmarks that lie inside an inverted
     /// segment. Counted against the majority orientation, so a whole-genome
@@ -981,6 +1010,23 @@ mod tests {
             "contig boundaries are missing adjacencies, not broken ones; got {:?}",
             r.junctions
         );
+        // Three contigs hide two adjacencies out of 39, and that is what
+        // observable_fraction is for. Contig count is a discount on power, never
+        // a divisor of the junction count.
+        assert_eq!(r.observable_adjacencies, 37);
+        assert!(
+            (r.observable_fraction - 37.0 / 39.0).abs() < 1e-9,
+            "got {}",
+            r.observable_fraction
+        );
+    }
+
+    #[test]
+    fn observable_fraction_is_one_for_two_closed_genomes() {
+        let s = seqs(40);
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &s))
+            .expect("shared");
+        assert_eq!(r.observable_fraction, 1.0);
     }
 
     // ── Orientation signal ─────────────────────────────────────────────────
