@@ -280,28 +280,45 @@ Two defects were found by writing these rather than assuming them:
    reversal-invariant. Shared landmarks are now identical (2806) across all three
    genome-scale controls.
 
-### Phase 2 — detection power, measured not assumed
+### Phase 2 — detection power, measured not assumed *(done)*
 
-Simulate an event-length ladder (500 bp → 500 kb) × event-type (inversion,
-translocation, deletion, insertion) × substitution load (0 → 5%) × enzyme panel.
-Output the **power curve**: P(detected | length, type, panel). This replaces
-§5.4's CI with the quantity that actually governs uncertainty, and it directly
-tests whether the ≈4–8 kb floor derived above is right.
+Full results in [PHASE2_DETECTION_POWER.md](PHASE2_DETECTION_POWER.md); 72 cells
+over event type × length (500 bp–256 kb) × substitution load (0–5%) × enzyme
+panel, 40 events per cell, truth recorded at construction.
 
-### Phase 3 — `Ĉ_bp` as a baseline, not the primary route
+The result that replaces §5.4's confidence interval: **detection power is
+predicted by landmark spacing alone**, with no free parameters — an inversion
+needs ≥2 shared landmarks inside it, a translocation ≥1, and
+`P(≥ m landmarks in a window)` fits the whole grid at **mean error +0.0051,
+sd 0.0594**. So the resolution limit of any panel on any genome is *computable*:
+digest once, count landmarks, read off the curve. L50 is predicted well; L95 is
+under-predicted by ~1.5× because restriction sites clump rather than being
+Poisson, so quote the measured L95.
 
-Now that the orientation channel measures the inverted fraction directly
-(§6, slope 1.0072, R² 0.9988), §7's `Ĉ_bp` is demoted to a comparison baseline.
-On the same simulations, fit both and report where the assumed-length-
-distribution route diverges from the measured one as the distribution is varied
-(fixed / exponential / heavy-tailed). The interesting result is the size of the
-gap, since that gap is what a count-only method has to live with.
+Measured floors: inversion 2.6 kb (L50) / 12.7 kb (L95) with BcgI, 1.2 kb / 5.0 kb
+with the four-enzyme panel; translocations at roughly half those sizes.
+Specificity across the entire grid: **31 false-positive junctions out of 5,310
+(0.58%)**. Events ≥32 kb are detected with power 1.000 at every substitution load
+on both panels, except BcgI at 5% where tag survival falls to 20%.
 
-The orientation channel's own open question is different and more useful:
-it currently measures inverted extent. Translocated-but-not-inverted segments do
-not flip, so they are counted by junctions and invisible to the fraction. Whether
-a comparable direct measure exists for translocation extent is the next question
-worth attacking.
+### Phase 3 — `Ĉ_bp` as a baseline, not the primary route *(first result in)*
+
+Quantified on the Phase 2 grid (see PHASE2_DETECTION_POWER.md §6). Any map from a
+junction count to a genome fraction needs a mean event length λ, which counts
+cannot supply. Against a fixed λ = 50 kb prior, the count-only estimate runs from
+**12× over** (500 bp events) to **5× under** (256 kb events), for a mean absolute
+error **42× worse** than the orientation channel — which needs no prior at all
+and holds slope 0.968, R² 0.9993 across the same 512× range of event lengths and
+0–5% divergence.
+
+`Ĉ_bp` stays useful as the baseline a count-only method is stuck with, but it
+should not be the primary estimator, and calibrating its length distribution is
+not where the effort belongs.
+
+**Still open:** the orientation channel measures *inverted* extent only. A
+segment that moves without flipping flips no landmark, so translocation extent
+remains count-only. Whether a comparable direct measure exists is the next
+question worth attacking.
 
 ### Phase 4 — external comparators on real closed genomes
 
