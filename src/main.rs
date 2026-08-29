@@ -186,15 +186,28 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     // Write output
     let mut f = std::fs::File::create(output_path)?;
     writeln!(f, "# Syn2b Pairwise Synteny Matrix")?;
-    writeln!(f, "# structural = canonical tags, shared-tag restricted, ordered")?;
-    writeln!(f, "#   adjacency. Invariant to substitution-driven tag loss.")?;
-    writeln!(f, "# legacy_adjacency = the previous metric: all consecutive tags,")?;
-    writeln!(f, "#   unordered pairs, no canonicalisation. Dominated by")?;
-    writeln!(f, "#   substitution load rather than structure; kept for comparison.")?;
+    writeln!(f, "# breakpoints = junctions: adjacencies of A that B does not")?;
+    writeln!(f, "#   conserve. Exactly 2 per inversion, 3 per translocation, 0")?;
+    writeln!(f, "#   under substitution loads to at least 5%. This is the column")?;
+    writeln!(f, "#   to use; junction coordinates are written alongside.")?;
+    writeln!(f, "# scj_distance = symmetric difference of the adjacency sets, the")?;
+    writeln!(f, "#   single-cut-or-join distance; twice breakpoints when circular.")?;
+    writeln!(f, "# structural = conserved adjacencies over their union. Kept for")?;
+    writeln!(f, "#   continuity, but it divides a discrete event by the landmark")?;
+    writeln!(f, "#   count, so one inversion moves it by ~0.001.")?;
+    writeln!(f, "# legacy_adjacency = the original metric: all consecutive tags, no")?;
+    writeln!(f, "#   canonicalisation. Dominated by substitution load, not structure.")?;
     writeln!(
         f,
-        "genome_A,genome_B,structural,breakpoints,breakpoint_density,shared_tags,repeats_dropped,legacy_adjacency"
+        "genome_A,genome_B,breakpoints,scj_distance,breakpoint_density,structural,\
+shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
     )?;
+
+    // Junction coordinates go to their own file: they are the deliverable, and
+    // a variable-length list does not belong in a matrix cell.
+    let junction_path = output_path.with_extension("junctions.tsv");
+    let mut jf = std::fs::File::create(&junction_path)?;
+    writeln!(jf, "genome_A\tgenome_B\tjunction_pos_in_A")?;
 
     for i in 0..genome_ids.len() {
         for j in (i + 1)..genome_ids.len() {
@@ -202,18 +215,25 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
             let gj = &genome_ids[j];
             let legacy = matrix.get(&(gi.clone(), gj.clone())).unwrap_or(&0.0);
             match structural_synteny(&records[i], &records[j]) {
-                Some(r) => writeln!(
-                    f,
-                    "{},{},{:.4},{},{:.5},{},{},{:.4}",
-                    gi, gj, r.score, r.breakpoints, r.breakpoint_density, r.shared_tags,
-                    r.repeats_dropped, legacy
-                )?,
-                None => writeln!(f, "{},{},NA,NA,NA,0,0,{:.4}", gi, gj, legacy)?,
+                Some(r) => {
+                    writeln!(
+                        f,
+                        "{},{},{},{},{:.5},{:.4},{},{},{},{},{:.4}",
+                        gi, gj, r.breakpoints, r.scj_distance, r.breakpoint_density, r.score,
+                        r.shared_tags, r.repeats_dropped, r.landmarks_collapsed, r.circular,
+                        legacy
+                    )?;
+                    for pos in &r.junctions {
+                        writeln!(jf, "{}\t{}\t{}", gi, gj, pos)?;
+                    }
+                }
+                None => writeln!(f, "{},{},NA,NA,NA,NA,0,0,0,false,{:.4}", gi, gj, legacy)?,
             }
         }
     }
 
     println!("Synteny matrix written to {:?}", output_path);
+    println!("Junction coordinates written to {:?}", junction_path);
     Ok(())
 }
 

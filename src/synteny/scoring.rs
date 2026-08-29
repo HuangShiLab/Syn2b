@@ -175,46 +175,149 @@ fn pairwise_score(graph: &TagAdjacencyGraph, genome_a: &str, genome_b: &str) -> 
 ///    the second belongs in a structural metric. ([`breakpoint_count`] already
 ///    does this; `pairwise_score` does not, which is why the two disagree on the
 ///    same input.)
-/// 3. **Ordered adjacency.** With unordered pairs, reversing a segment preserves
-///    every adjacency inside it and changes only the two breakpoints, so a
-///    400 kb inversion moves the score by 0.0014 — invisible. Ordered pairs
-///    capture the reversal.
+/// 3. **Direction-free adjacency, one contig at a time.** An adjacency is the
+///    unordered pair {a, b}. A chromosome read backwards is the same chromosome,
+///    and in a draft assembly every contig's orientation is arbitrary. The
+///    ordered variant this function used to build scored a genome against its own
+///    reverse complement as 0.0000, and reported 560 junctions for a 400 kb
+///    inversion whose true junction count is 2 — it was counting every adjacency
+///    *inside* the inverted segment. Adjacencies are never formed across a contig
+///    boundary, where no adjacency exists.
+/// 4. **Overlapping cut sites collapsed.** Different enzymes cut the same locus:
+///    with the four-enzyme panel, 305 adjacent landmark pairs on E. coli K-12 sit
+///    under 40 bp apart while the tags themselves are 27–32 bp long. Their
+///    relative order is an artifact, and since tag length varies by enzyme an
+///    inversion shifts them by different amounts and can swap them. Collapsing
+///    them took a 400 kb inversion from 8 reported junctions to the correct 4
+///    (total absolute error over 12 test genomes: 14 → 6).
+/// 5. **Circular origin normalised.** Bacterial chromosomes are circular and
+///    assemblies begin at an arbitrary base, so a single-contig genome is closed
+///    into a cycle. Without this, two identical genomes differing only in where
+///    the assembly starts report two junctions.
 ///
-/// Measured result of the three together on the same genomes:
+/// Measured on genome suites built from E. coli K-12 MG1655 (ENA U00096.3) with
+/// every event recorded at construction time:
 ///
 /// ```text
-///   popANI    substitutions only    substitutions + 400 kb inversion
-///  100.00%                1.0000                              0.8246
-///   99.00%                0.9898                              0.8104
-///   95.00%                0.9019                              0.7402
+///   construction                       junctions   scj_distance
+///   substitutions only, 0.5% to 5%             0              0
+///   one 400 kb inversion                       2              4
+///   five inversions                           10             20
+///   twenty inversions                         40             80
+///   one 100 kb translocation                   3              6
 /// ```
 ///
-/// Substitution response falls from a 0.989-wide collapse to 0.098, and the
-/// inversion costs a near-constant -0.17 at every divergence instead of decaying
-/// to -0.001.
+/// The junction count is exact and follows the rearrangement-theory convention
+/// that one inversion cuts the chromosome in two places, so it agrees with
+/// Syn2bANI's `breakpoint_count` and with nucmer/SyRI. It stays at exactly zero
+/// under substitution loads up to 5%, and stays exact up to at least twenty
+/// events. `scj_distance` is the symmetric difference of the two adjacency sets —
+/// the published single-cut-or-join distance — which counts each junction twice
+/// because every cut destroys one adjacency and creates another.
+///
+/// # Resolution limit
+///
+/// An event is invisible unless at least **two** landmarks fall inside it: with
+/// one landmark, the inversion reverse-complements that tag, canonicalisation
+/// maps it back to the same identity, and both flanking adjacencies are
+/// unchanged. Measured 95%-detection sizes: ~8 kb for BcgI alone, ~4 kb for the
+/// four-enzyme panel. This is a sampling limit, not an implementation defect.
 ///
 /// Returns `None` when fewer than two tags are shared, since no adjacency exists
 /// to compare.
+/// Minimum separation between consecutive landmarks, in base pairs.
+///
+/// Type IIB enzymes cut at overlapping loci. On E. coli K-12 with the
+/// BcgI,AlfI,AloI,FalI panel, 305 adjacent landmark pairs sit under 40 bp apart
+/// while the tags are 27–32 bp long, so they physically overlap and describe one
+/// locus. Single-enzyme panels have uniform tag length and are unaffected.
+const MIN_TAG_SEPARATION: u64 = 40;
+
+/// One landmark: canonical sequence, start position, contig.
+type Landmark = ([u8; 32], u64, u16);
+
+/// An adjacency, keyed so that {a, b} and {b, a} are the same entry.
+type Adjacency = ([u8; 32], [u8; 32]);
+
+fn undirected(a: [u8; 32], b: [u8; 32]) -> Adjacency {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Landmarks in genome order, with overlapping cut sites collapsed to the first
+/// of each run. Sorting is defensive: callers should not have to guarantee it.
+fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
+    let mut all: Vec<Landmark> = record
+        .tags
+        .iter()
+        .map(|t| (t.canonical_sequence(), t.position, t.contig_id))
+        .collect();
+    all.sort_by_key(|&(_, pos, contig)| (contig, pos));
+
+    let mut kept: Vec<Landmark> = Vec::with_capacity(all.len());
+    for lm in all {
+        let overlaps = matches!(
+            kept.last(),
+            Some(&(_, prev_pos, prev_contig))
+                if prev_contig == lm.2 && lm.1.saturating_sub(prev_pos) < MIN_TAG_SEPARATION
+        );
+        if !overlaps {
+            kept.push(lm);
+        }
+    }
+    kept
+}
+
+/// Adjacency set of a landmark series, each mapped to the position of its left
+/// landmark so a broken adjacency can be reported as a coordinate.
+fn adjacency_set(series: &[Landmark], circular: bool) -> HashMap<Adjacency, u64> {
+    let mut adj = HashMap::with_capacity(series.len());
+    for w in series.windows(2) {
+        if w[0].2 != w[1].2 {
+            continue; // consecutive in the file, but on different contigs
+        }
+        adj.insert(undirected(w[0].0, w[1].0), w[0].1);
+    }
+    if circular && series.len() >= 3 {
+        let last = series[series.len() - 1];
+        adj.insert(undirected(last.0, series[0].0), last.1);
+    }
+    adj
+}
+
+/// True when every landmark sits on one contig, the case where closing the
+/// series into a cycle is the right thing to do.
+fn single_contig(series: &[Landmark]) -> bool {
+    match series.first() {
+        None => false,
+        Some(&(_, _, c)) => series.iter().all(|lm| lm.2 == c),
+    }
+}
+
 pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<StructuralSynteny> {
-    let canon_a: Vec<[u8; 32]> = record_a.tags.iter().map(|t| t.canonical_sequence()).collect();
-    let canon_b: Vec<[u8; 32]> = record_b.tags.iter().map(|t| t.canonical_sequence()).collect();
+    let series_a = landmark_series(record_a);
+    let series_b = landmark_series(record_b);
+    let collapsed =
+        (record_a.tags.len() - series_a.len()) + (record_b.tags.len() - series_b.len());
 
     // A canonical sequence occurring at several loci cannot be assigned to one
     // of them, so it carries no usable order information and every copy
     // contributes a spurious adjacency. Repeats are dropped from BOTH genomes.
     //
     // Measured on E. coli K-12 (BcgI): 13 canonical sequences are multi-copy,
-    // 63 tag instances or 2.1% of the total, one of them at 11 loci. That
-    // ambiguity is what stops the substitution response being exactly flat.
-    let count = |v: &[[u8; 32]]| -> HashMap<[u8; 32], usize> {
+    // 63 tag instances or 2.1% of the total, one of them at 11 loci.
+    let count = |v: &[Landmark]| -> HashMap<[u8; 32], usize> {
         let mut m = HashMap::new();
-        for s in v {
+        for (s, _, _) in v {
             *m.entry(*s).or_insert(0) += 1;
         }
         m
     };
-    let ca = count(&canon_a);
-    let cb = count(&canon_b);
+    let ca = count(&series_a);
+    let cb = count(&series_b);
 
     let unique_a: HashSet<[u8; 32]> =
         ca.iter().filter(|(_, &n)| n == 1).map(|(s, _)| *s).collect();
@@ -225,52 +328,81 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         return None;
     }
 
-    // Keep only shared tags, preserving each genome's own order.
-    let kept_a: Vec<[u8; 32]> = canon_a.into_iter().filter(|s| shared.contains(s)).collect();
-    let kept_b: Vec<[u8; 32]> = canon_b.into_iter().filter(|s| shared.contains(s)).collect();
+    // Keep only shared landmarks, preserving each genome's own order.
+    let kept_a: Vec<Landmark> = series_a.into_iter().filter(|l| shared.contains(&l.0)).collect();
+    let kept_b: Vec<Landmark> = series_b.into_iter().filter(|l| shared.contains(&l.0)).collect();
 
-    let ordered = |v: &[[u8; 32]]| -> HashSet<([u8; 32], [u8; 32])> {
-        v.windows(2).map(|w| (w[0], w[1])).collect()
-    };
-    let oa = ordered(&kept_a);
-    let ob = ordered(&kept_b);
-    if oa.is_empty() && ob.is_empty() {
+    // Only close the cycle when both genomes are single-contig. Against a draft
+    // assembly there is no origin to normalise and the closure would invent an
+    // adjacency across the gap between the first and last contig.
+    let circular = single_contig(&kept_a) && single_contig(&kept_b);
+
+    let adj_a = adjacency_set(&kept_a, circular);
+    let adj_b = adjacency_set(&kept_b, circular);
+    if adj_a.is_empty() && adj_b.is_empty() {
         return None;
     }
 
-    let conserved = oa.intersection(&ob).count();
-    let union = oa.union(&ob).count();
+    let conserved = adj_a.keys().filter(|k| adj_b.contains_key(*k)).count();
+    let union = adj_a.len() + adj_b.len() - conserved;
 
-    // Breakpoints are adjacencies present in one genome but not the other,
-    // counted on the shared-tag series so substitutions cannot inflate them.
-    let breakpoints = union - conserved;
+    // A junction is an adjacency of A that B does not conserve. One inversion
+    // produces exactly two; the symmetric difference counts each twice, because
+    // every cut both destroys an adjacency and creates one.
+    let mut junctions: Vec<u64> = adj_a
+        .iter()
+        .filter(|(k, _)| !adj_b.contains_key(*k))
+        .map(|(_, &pos)| pos)
+        .collect();
+    junctions.sort_unstable();
 
     Some(StructuralSynteny {
         score: conserved as f64 / union as f64,
         shared_tags: shared.len(),
         repeats_dropped: (ca.len() - unique_a.len()) + (cb.len() - unique_b.len()),
+        landmarks_collapsed: collapsed,
+        circular,
         conserved_adjacencies: conserved,
-        breakpoints,
-        // Normalised so genomes of different tag density stay comparable.
-        breakpoint_density: breakpoints as f64 / shared.len() as f64,
+        breakpoints: junctions.len(),
+        scj_distance: adj_a.len() + adj_b.len() - 2 * conserved,
+        // Normalised so genomes of different landmark density stay comparable.
+        breakpoint_density: junctions.len() as f64 / shared.len() as f64,
+        junctions,
     })
 }
 
 /// Output of [`structural_synteny`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructuralSynteny {
-    /// Conserved ordered adjacencies over their union. 1.0 = collinear.
+    /// Conserved adjacencies over their union. 1.0 = collinear. Reported for
+    /// continuity, but it divides a discrete event by the landmark count: one
+    /// inversion among ~2,900 landmarks moves it by 0.0014. Prefer
+    /// [`Self::breakpoints`].
     pub score: f64,
-    /// Tags present in both genomes, i.e. the basis the score is computed on.
+    /// Landmarks present and unique in both genomes — the basis of the score.
     pub shared_tags: usize,
     pub conserved_adjacencies: usize,
-    /// Adjacencies in one genome but not the other.
+    /// Junctions: adjacencies of A that B does not conserve. Exactly 2 per
+    /// inversion and 3 per translocation, matching nucmer/SyRI and Syn2bANI's
+    /// `breakpoint_count`. Zero under substitution loads up to at least 5%.
     pub breakpoints: usize,
-    /// Breakpoints per shared tag, for comparing across tag densities.
+    /// Symmetric difference of the two adjacency sets: the single-cut-or-join
+    /// distance, twice [`Self::breakpoints`] when both genomes are circular.
+    pub scj_distance: usize,
+    /// Reference positions of the broken adjacencies. This is the output worth
+    /// consuming: on E. coli K-12 a 400 kb inversion is localised to within one
+    /// landmark spacing of the true junctions.
+    pub junctions: Vec<u64>,
+    /// Junctions per shared landmark, for comparing across landmark densities.
     pub breakpoint_density: f64,
     /// Multi-copy canonical sequences excluded, summed over both genomes. They
     /// are ambiguous for order and would each add a spurious adjacency.
     pub repeats_dropped: usize,
+    /// Landmarks dropped as overlapping cut sites, summed over both genomes.
+    pub landmarks_collapsed: usize,
+    /// Whether both genomes were single-contig and the series were closed into
+    /// cycles. When false the comparison is origin-sensitive at the ends.
+    pub circular: bool,
 }
 
 fn genome_order_in_graph(graph: &TagAdjacencyGraph, genome_id: &str) -> Option<Vec<u64>> {
