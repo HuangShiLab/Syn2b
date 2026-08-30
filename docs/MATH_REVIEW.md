@@ -40,7 +40,8 @@ validated against exact truth at slope 1.0072, R² 0.9988 (§6). Junctions count
 how *often* the genome moved; orientation measures how *much* of it moved.
 
 Sections 1–4 and 5.1–5.3 are correct. Four specific defects follow, one of which
-(§3) is now fixed.
+(§3) is now fixed — and §7 shows that three of the four were instances of one
+general fact about statistics built on counts of transitions.
 
 ---
 
@@ -169,7 +170,9 @@ The real uncertainty is **structured, not stochastic**, and has two named source
 
 Both are *deterministic given the genome*, so the honest uncertainty statement is
 a **detection-power curve as a function of event length**, plus a reported count
-of dropped repeat tags — not a binomial CI. `repeats_dropped` and
+of dropped repeat tags — not a binomial CI. That curve now exists and needs no
+free parameters: see §8 Phase 2, and §7 for the fragmentation half of the same
+statement. `repeats_dropped` and
 `landmarks_collapsed` are already emitted for this purpose.
 
 ---
@@ -227,7 +230,101 @@ method that has counts but no orientation, and it is worth keeping as a baseline
 to measure the orientation channel against. But it is no longer the primary
 route, and the effort budgeted for it in Phase 3 should shrink accordingly.
 
-## 7. Research plan
+## 7. A general result the specific critiques were instances of
+
+Added 2026-08-30, after the Phase 2 grid and the GTDB50k external comparison.
+Three of the four defects above, and two independent findings since, are the same
+fact in different clothes. It is worth stating once, in general form, because it
+decides which quantities the method should report.
+
+### Setup
+
+Every observation process here partitions a genome into contiguous observed
+segments: contigs (assembly), 1-to-1 blocks (nucmer), chains (Syn2bANI anchors),
+landmark runs (Syn2b). Let a genome carry `S` landmarks and let the process yield
+`K` segments, hence `K − 1` internal boundaries at which adjacency information is
+simply absent.
+
+### Transition counts acquire a term linear in K
+
+The observable adjacencies drop from `S` (circular) to `S − K`. So any statistic
+that counts transitions — junctions, breakpoints, blocks, chain ends — has
+
+    E[T] = T_true + c·(K − 1) + …
+
+and `c` is decided by one design choice: **is an absent adjacency counted as a
+contradicted one?**
+
+| implementation | c | measured |
+|---|---:|---|
+| absence counted as a junction (Syn2b before the fix) | 1 | 119 false junctions on a 120-contig assembly of the genome itself |
+| dnadiff `Breakpoints` (every 1-to-1 block boundary) | 1 | intercept **290** in `dnadiff_breakpoints = 5.35·b + 290`, and a median of 92 where Syn2bANI reports zero |
+| segment count subtracted on one side only (Syn2bANI: query yes, reference no) | 1 for the other side | `+ (n_ref − 1)` exactly: 10 → 29 → 207 at n_ref = 1, 20, 200 |
+| positive contradiction required (Syn2b now) | **0** | 0 junctions at every K up to 1000 |
+
+Note the third row is not a bug so much as an asymmetry, and the fourth shows the
+term is removable in principle, not merely reducible.
+
+### Length-weighted ratios are invariant to K
+
+Define `F = Σ_{i∈P} ℓ_i / Σ_i ℓ_i`, where `P` is a property that splitting
+preserves — "this segment is inverted relative to the other genome" is one.
+Splitting segment `i` into `i₁, i₂` with `ℓ_i = ℓ_{i₁} + ℓ_{i₂}` leaves both sums
+exactly unchanged, so **`F` does not depend on `K` at all**. No correction term
+exists to get wrong.
+
+Measured: `inverted_fraction` reads **0.000** on a 120-contig assembly of the
+genome itself, and regresses on true inverted base-pair fraction at slope 0.968,
+R² 0.9993 across a 512× range of event lengths and 0–5% divergence.
+
+The price is real and should be stated with it: a ratio carries no event count,
+and it saturates — past 50% the minority frame becomes the majority one. So the
+two are **complementary with disjoint failure modes**: counts are exact in event
+number and fragile to fragmentation; ratios are robust to fragmentation and blind
+to event number. Report both; do not derive one from the other.
+
+### Corollary: the power discount, in closed form
+
+If the count is corrected rather than contaminated (`c = 0`), what remains is a
+loss of *sensitivity*: junctions falling at segment boundaries are invisible.
+That share is exactly the observable adjacency fraction,
+
+    observable_fraction ≈ 1 − (K − 1) / S
+
+exact to four decimals up to K = 300 on E. coli/BcgI, drifting below the formula
+once segments hold fewer than about two landmarks. It is an unbiased predictor of
+how many true junctions survive: `10 × observable_fraction` against observed, over
+16 fragmentation levels, gives mean error −0.31, sd 1.26 — against a binomial
+sampling sd of ≈1.5 at a truth of 10.
+
+Practical form, scale-free in the panel: recovery is essentially complete while
+segments hold **≳10 landmarks**, i.e. contig N50 ≳ 10× the landmark spacing.
+
+### What this changes about §7 of the source document
+
+The earlier argument against `Ĉ_bp` was that it needs an event-length prior it
+cannot estimate (measured cost: 42× worse than the orientation channel across a
+512× length range). The result above is a **second, independent** argument, and a
+stronger one, because it bites even when the length prior happens to be right:
+`Ĉ_bp` is built on a count, so it inherits the `c·(K − 1)` term from whatever
+fragmented the input. The orientation channel is a ratio and does not.
+
+### A prediction, stated before the data
+
+The dnadiff `.1coords` files needed for this are already on the HPC. Computing the
+inverted aligned fraction — `Σ|E2 − S2|` over reversed-query blocks over `Σ|E2 −
+S2|` over all blocks — should, if the above is right, show:
+
+1. **no material intercept** against Syn2b's `inverted_fraction`, where the count
+   comparison showed 290; and
+2. **correlation that does not improve when contig count is controlled**, since
+   neither side carries a `K` term — unlike `breakpoint_count ~
+   dnadiff_breakpoints`, which rose 0.465 → 0.534 under exactly that control.
+
+A materially non-zero intercept would mean the invariance argument is wrong
+somewhere, and that is worth finding out.
+
+## 8. Research plan
 
 ### Phase 0 — make the estimator well-defined (this commit)
 
