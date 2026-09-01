@@ -336,6 +336,49 @@ frame at 50%.
 A materially non-zero intercept would mean the invariance argument is wrong
 somewhere, and that is worth finding out.
 
+### The prediction, resolved
+
+Both parts hold, on 43,312 held-out GTDB pairs and 6,922 high-ANI pairs
+(`Syn2bANI-paper/results/gtdb50k/inverted_fraction_comparison_report.md`).
+
+1. **No material intercept.** `Syn2b = 1.0039 * dnadiff − 0.0024`, Bland–Altman
+   bias −0.0005, median difference −0.0002. Where the count comparison carried an
+   intercept of 290, the ratio carries none. Slope and bias hold band by band from
+   80% to 100% ANIm — the estimator needs no calibration constant anywhere on that
+   axis.
+2. **Controlling fragmentation does not help.** r goes 0.9355 → 0.9354 when
+   `observable_fraction` is partialled out. `breakpoint_count ~ dnadiff_breakpoints`
+   rose 0.465 → 0.534 under exactly that control. That is the `c · (K − 1)` term
+   present in one and absent in the other, measured.
+3. **The fixed-reference form spans [0, 1].** r = 0.9355 against the majority-frame
+   form's 0.1771 on the same pairs, and above 0.5 the majority-frame value tracks
+   `1 − dnadiff` at r = +0.896 — the saturation is the frame flip, as claimed, not
+   noise.
+
+The residual then turned out to have a closed form of its own. Binning by shared
+landmark count `m` and fitting a sampling term plus a floor gives
+
+```
+Var(err) = 1.504 · p(1−p)/m + 0.0205²        (12 bins, R² = 0.9988)
+```
+
+which reproduces the aggregate spread out of sample (SD of standardised residuals
+1.006, 95.3% within ±2 SE). Divergence enters only through `m`: lower ANI destroys
+restriction sites, so the same ratio is estimated from a smaller sample. Bias stays
+at zero throughout. The coefficient 1.5 rather than 1 is the design effect from
+landmarks being clustered inside inverted segments rather than independently drawn,
+and the floor is the difference in denominators — dnadiff averages over aligned
+bases, this averages over shared landmarks. The floor is not constant either: it
+falls to 0.0122 at ≥99.5% ANIm, so it is a divergence effect and not a fixed cost
+of the method.
+
+Two limits on what this establishes. It validates the **orientation channel only** —
+the junction/count channel has no comparable external check, which is what the
+classified dnadiff events are for. And the fixed-reference form buys its [0, 1]
+range by giving up whole-genome reverse-complement invariance, which is a real
+property to surrender; the majority-frame form remains the one to use when no
+reference frame is privileged.
+
 ## 8. Research plan
 
 ### Phase 0 — make the estimator well-defined (this commit)
@@ -436,6 +479,7 @@ different things, and they must be treated as such:
 
 | Comparator | What it actually measures | Use |
 |---|---|---|
+| `dnadiff` inverted aligned fraction | length-weighted orientation ratio | **done** — slope 1.0039, bias −0.0005, n = 43,312 |
 | `dnadiff` / ANIm aligned fraction | alignment-based conserved fraction | Phase-3 target for `Ĉ_bp` |
 | SynTracker APSS | **divergence**, not order (measured Δ: −0.00016 structure / −0.08751 divergence) | *Not* a synteny target — a discriminant-validity control |
 | Simulation | exact, by construction | primary truth |
