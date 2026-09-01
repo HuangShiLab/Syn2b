@@ -283,6 +283,14 @@ two are **complementary with disjoint failure modes**: counts are exact in event
 number and fragile to fragmentation; ratios are robust to fragmentation and blind
 to event number. Report both; do not derive one from the other.
 
+When the goal is comparison with a fixed-reference alignment method (e.g.
+dnadiff), the saturation can be avoided by reporting the orientation mismatch
+fraction **relative to the chosen reference genome** instead of relative to the
+majority frame. This `raw_inverted_fraction` ranges in [0, 1], loses whole-
+genome reverse-complement invariance (a genome and its complement read as 1.0,
+exactly as dnadiff reports), and becomes the direct analog of the alignment-
+based inverted aligned fraction.
+
 ### Corollary: the power discount, in closed form
 
 If the count is corrected rather than contaminated (`c = 0`), what remains is a
@@ -320,6 +328,10 @@ S2|` over all blocks — should, if the above is right, show:
 2. **correlation that does not improve when contig count is controlled**, since
    neither side carries a `K` term — unlike `breakpoint_count ~
    dnadiff_breakpoints`, which rose 0.465 → 0.534 under exactly that control.
+
+In addition, the fixed-reference `raw_inverted_fraction` should correlate with
+dnadiff across the full [0, 1] range, because it no longer flips the reference
+frame at 50%.
 
 A materially non-zero intercept would mean the invariance argument is wrong
 somewhere, and that is worth finding out.
