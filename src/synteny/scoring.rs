@@ -487,6 +487,11 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
     // its length is indistinguishable from its complement, and the fraction
     // saturates at 0.5. The junction count does not saturate, so the two
     // together still separate the cases.
+    //
+    // For comparison with alignment-based methods that use a fixed reference
+    // (e.g. dnadiff), also report the raw mismatch fraction relative to the
+    // first genome. This is orientation_mismatches / informative and ranges in
+    // [0, 1] with no saturation.
     let minority = orientation_mismatches.min(informative - orientation_mismatches);
 
     Some(StructuralSynteny {
@@ -513,7 +518,16 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         } else {
             minority as f64 / informative as f64
         },
+        // Raw orientation mismatch fraction relative to genome A (the first
+        // argument). This matches fixed-reference alignment methods like
+        // dnadiff and does not saturate at 0.5.
+        raw_inverted_fraction: if informative == 0 {
+            0.0
+        } else {
+            orientation_mismatches as f64 / informative as f64
+        },
         orientation_mismatches: minority,
+        orientation_mismatches_raw: orientation_mismatches,
     })
 }
 
@@ -569,6 +583,10 @@ pub struct StructuralSynteny {
     /// reverse complement scores 0. Independent of [`Self::breakpoints`], which
     /// counts events rather than their extent.
     pub orientation_mismatches: usize,
+    /// Raw count of orientation mismatches relative to genome A (the first
+    /// argument), before scoring against the majority frame. This is the
+    /// numerator of [`Self::raw_inverted_fraction`].
+    pub orientation_mismatches_raw: usize,
     /// Shared landmarks that are their own reverse complement and so cannot
     /// report orientation. Reported because they bound the resolution of
     /// [`Self::orientation_mismatches`].
@@ -579,6 +597,13 @@ pub struct StructuralSynteny {
     /// directly comparable with alignment-based synteny measures. Saturates at
     /// 0.5, since past that point the minority frame becomes the majority one.
     pub inverted_fraction: f64,
+    /// Orientation mismatch fraction relative to genome A (the first argument),
+    /// i.e. [`Self::orientation_mismatches_raw`] / informative. This matches
+    /// fixed-reference alignment methods such as dnadiff and ranges in [0, 1]
+    /// without saturation. It is not invariant to whole-genome reverse
+    /// complement: a genome and its reverse complement read as 1.0, just as
+    /// dnadiff reports.
+    pub raw_inverted_fraction: f64,
 }
 
 fn genome_order_in_graph(graph: &TagAdjacencyGraph, genome_id: &str) -> Option<Vec<u64>> {
@@ -1060,6 +1085,27 @@ mod tests {
         assert_eq!(large.orientation_mismatches, 50, "50 landmarks moved");
         assert!((small.inverted_fraction - 0.10).abs() < 1e-9);
         assert!((large.inverted_fraction - 0.50).abs() < 1e-9);
+
+        // raw_inverted_fraction is the same as inverted_fraction when the
+        // minority frame is genome B's, but does not saturate past 50%.
+        assert_eq!(small.orientation_mismatches_raw, 10);
+        assert_eq!(large.orientation_mismatches_raw, 50);
+        assert!((small.raw_inverted_fraction - 0.10).abs() < 1e-9);
+        assert!((large.raw_inverted_fraction - 0.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn raw_inverted_fraction_matches_fixed_reference() {
+        // A fixed-reference metric should report 1.0 when genome B is the
+        // reverse complement of genome A, exactly as dnadiff would.
+        let s = seqs(40);
+        let mut rc: Vec<String> = s.iter().map(|x| revcomp(x)).collect();
+        rc.reverse();
+
+        let r = structural_synteny(&record_from("a", &s), &record_from("b", &rc))
+            .expect("canonicalisation must keep every tag shared");
+        assert!((r.raw_inverted_fraction - 1.0).abs() < 1e-9,
+            "whole-genome reverse complement should read as 1.0 for fixed-reference metric");
     }
 
     #[test]

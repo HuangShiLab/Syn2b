@@ -148,6 +148,11 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
         anyhow::bail!("No .tgt files found in {:?}", input_dir);
     }
 
+    // Sort deterministically so callers can control which genome is genome_A
+    // (the reference for raw_inverted_fraction) by naming the file first
+    // alphabetically.
+    tgt_files.sort();
+
     println!("Found {} TGT file(s)", tgt_files.len());
 
     // Build graph
@@ -196,6 +201,9 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     writeln!(f, "#   over the orientation-informative ones. Measures how much of")?;
     writeln!(f, "#   the genome moved; breakpoints measures how often. A fraction,")?;
     writeln!(f, "#   so it is comparable with alignment-based synteny measures.")?;
+    writeln!(f, "# raw_inverted_fraction = same numerator, but relative to genome_A")?;
+    writeln!(f, "#   (no majority-frame flip). Ranges in [0,1] and matches fixed-")?;
+    writeln!(f, "#   reference alignment methods such as dnadiff.")?;
     writeln!(f, "# observable_fraction = share of A's adjacencies that B can judge")?;
     writeln!(f, "#   at all; the rest are stranded at contig ends. THIS is where")?;
     writeln!(f, "#   contig count belongs -- as a discount on detection power, not")?;
@@ -209,7 +217,7 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     writeln!(
         f,
         "genome_A,genome_B,breakpoints,scj_distance,breakpoint_density,\
-inverted_fraction,orientation_mismatches,orientation_uninformative,\
+inverted_fraction,raw_inverted_fraction,orientation_mismatches,orientation_mismatches_raw,orientation_uninformative,\
 observable_fraction,observable_adjacencies,structural,\
 shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
     )?;
@@ -229,11 +237,11 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
                 Some(r) => {
                     writeln!(
                         f,
-                        "{},{},{},{},{:.5},{:.5},{},{},{:.4},{},{:.4},{},{},{},{},{:.4}",
+                        "{},{},{},{},{:.5},{:.5},{:.5},{},{},{},{:.4},{},{:.4},{},{},{},{},{:.4}",
                         gi, gj, r.breakpoints, r.scj_distance, r.breakpoint_density,
-                        r.inverted_fraction, r.orientation_mismatches,
-                        r.orientation_uninformative, r.observable_fraction,
-                        r.observable_adjacencies, r.score,
+                        r.inverted_fraction, r.raw_inverted_fraction, r.orientation_mismatches,
+                        r.orientation_mismatches_raw, r.orientation_uninformative,
+                        r.observable_fraction, r.observable_adjacencies, r.score,
                         r.shared_tags, r.repeats_dropped, r.landmarks_collapsed, r.circular,
                         legacy
                     )?;
@@ -243,7 +251,7 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
                 }
                 None => writeln!(
                     f,
-                    "{},{},NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,0,false,{:.4}",
+                    "{},{},NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,NA,0,0,0,false,{:.4}",
                     gi, gj, legacy
                 )?,
             }
