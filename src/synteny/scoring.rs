@@ -547,10 +547,88 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
     }
     let saturated = |seq: &[u8; 32]| degree_b.get(seq).copied().unwrap_or(0) >= 2;
 
+    // A relocation must be supported by at least two consecutive landmarks.
+    //
+    // A real rearrangement moves a *block*. Whatever the block's extent, its
+    // internal adjacencies survive the move, so every landmark at a broken
+    // adjacency still holds at least one adjacency it had in A -- the one to its
+    // block-mate. An inversion of [L5..L10] breaks {L4,L5} and {L10,L11} and
+    // nothing else, because adjacency is direction-free and {L5,L6}..{L9,L10} are
+    // unchanged.
+    //
+    // A single landmark that moves alone leaves no such trace: every adjacency it
+    // had in A is broken and it has acquired entirely new ones in B. That is not a
+    // rearrangement, it is a cross-genome identity failure -- the `sub_2` residual
+    // (docs/MATH_REVIEW.md). E. coli carries families of near-identical restriction
+    // sites; on a 5%-substituted copy a substitution can turn one paralog into
+    // another while the original copy of the latter is destroyed elsewhere. Both
+    // genomes then contain the sequence exactly once, so the per-genome uniqueness
+    // filter admits it, but the two copies sit megabases apart. The metric reads a
+    // landmark that teleported and breaks the adjacencies at both of its ends.
+    //
+    // So a landmark with adjacencies in both genomes and none in common has moved
+    // alone, and its broken adjacencies are rejected.
+    //
+    // THE PRICE, accepted deliberately: a genuine translocation that moves exactly
+    // one landmark is rejected with them. This raises the translocation detection
+    // floor from >=1 landmark to >=2 -- from L50 1,470 bp to roughly the inversion
+    // floor of 2,611 bp on BcgI, 1,242 bp on the four-enzyme panel. It costs
+    // nothing on inversions: flipping a single landmark in place does not change
+    // the direction-free adjacency set at all, only its orientation bit, so small
+    // inversions are carried by the orientation channel either way.
+    let mut deg_a: HashMap<[u8; 32], u32> = HashMap::with_capacity(adj_a.len());
+    let mut kept_deg_a: HashMap<[u8; 32], u32> = HashMap::with_capacity(adj_a.len());
+    for k @ (x, y) in adj_a.keys() {
+        *deg_a.entry(*x).or_insert(0) += 1;
+        *deg_a.entry(*y).or_insert(0) += 1;
+        if adj_b.contains_key(k) {
+            *kept_deg_a.entry(*x).or_insert(0) += 1;
+            *kept_deg_a.entry(*y).or_insert(0) += 1;
+        }
+    }
+    // Displaced alone: present in both genomes' adjacency sets, but sharing no
+    // adjacency between them. A landmark at a contig end in B is excluded by
+    // `saturated` before this ever applies.
+    let displaced_alone = |seq: &[u8; 32]| {
+        deg_a.get(seq).copied().unwrap_or(0) > 0
+            && degree_b.get(seq).copied().unwrap_or(0) > 0
+            && kept_deg_a.get(seq).copied().unwrap_or(0) == 0
+    };
+
+    // The same artifact damages a *third* adjacency, and this is the half that
+    // the endpoint test above misses. A landmark that teleports does not only
+    // break the adjacencies it left behind; it also lands somewhere, wedging
+    // itself between two landmarks that never moved. Measured on a 5%-substituted
+    // E. coli K-12 copy, all three residual junctions were of this kind: the two
+    // endpoints sat at byte-identical positions in both genomes, degree 2 in both,
+    // each holding one preserved adjacency, and the only difference was one
+    // intruder from the `GAACGCCTTATCCGG` paralog family sitting between them --
+    // arriving from 2,236,540 / 4,108,634 / 2,347,253 respectively.
+    //
+    // So {x, y} is also rejected when B's sole reason for breaking it is a
+    // displaced-alone landmark spliced into the gap: x-z and z-y both in B, with
+    // z displaced alone. A real translocation of two or more landmarks into the
+    // same gap keeps its internal adjacency, so its members are not displaced
+    // alone and the junction is kept.
+    let mut nbr_b: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::with_capacity(adj_b.len());
+    for (x, y) in adj_b.keys() {
+        nbr_b.entry(*x).or_default().push(*y);
+        nbr_b.entry(*y).or_default().push(*x);
+    }
+    let split_by_lone_intruder = |x: &[u8; 32], y: &[u8; 32]| {
+        nbr_b.get(x).is_some_and(|ns| {
+            ns.iter().any(|z| {
+                z != y && displaced_alone(z) && adj_b.contains_key(&undirected(*z, *y))
+            })
+        })
+    };
+
     let mut junctions: Vec<u64> = adj_a
         .iter()
         .filter(|(k, _)| !adj_b.contains_key(*k))
         .filter(|((x, y), _)| saturated(x) || saturated(y))
+        .filter(|((x, y), _)| !displaced_alone(x) && !displaced_alone(y))
+        .filter(|((x, y), _)| !split_by_lone_intruder(x, y))
         .map(|(_, &pos)| pos)
         .collect();
     junctions.sort_unstable();
@@ -1044,6 +1122,79 @@ mod tests {
     /// An inversion reverse-complements its segment and reverses tag order.
     /// Canonicalisation keeps the tags matchable; ordered adjacency sees the
     /// reversal.
+    #[test]
+    fn a_lone_displaced_landmark_is_not_a_relocation() {
+        // The `sub_2` residual. A landmark teleports on its own -- not because
+        // anything was rearranged, but because a substitution collapsed two members
+        // of a near-identical restriction-site family onto each other, so each
+        // genome contains the sequence exactly once and the per-genome uniqueness
+        // filter admits it. It does two kinds of damage, and both must be rejected.
+        let s = seqs(40);
+        let a = record_from("a", &s);
+
+        // Take landmark 5 out of its neighbourhood and drop it between 29 and 30.
+        // In A it sits between 4 and 6; in B between 29 and 30. Nothing else moves.
+        let mut moved: Vec<String> = Vec::with_capacity(s.len());
+        for (i, x) in s.iter().enumerate() {
+            if i == 5 {
+                continue;
+            }
+            moved.push(x.clone());
+            if i == 29 {
+                moved.push(s[5].clone());
+            }
+        }
+        let b = record_from("b", &moved);
+
+        let r = structural_synteny(&a, &b).expect("all tags still shared");
+        assert_eq!(r.shared_tags, 40, "nothing was lost, only reordered");
+        assert_eq!(
+            r.breakpoints, 0,
+            "one landmark moving alone is an identity failure, not a rearrangement; \
+             got {} junctions at {:?}",
+            r.breakpoints, r.junctions
+        );
+        // The evidence is not destroyed, only declassified: SCJ is the raw
+        // symmetric difference and still records that the order differs.
+        assert!(
+            r.scj_distance > 0,
+            "scj_distance is the unfiltered set distance and must still see it"
+        );
+    }
+
+    #[test]
+    fn a_two_landmark_relocation_is_still_counted() {
+        // The price of the rule above, and its exact size. Two landmarks moving
+        // together keep the adjacency between them, so neither is displaced alone
+        // and the junctions stand. Measured on E. coli K-12 with the four-enzyme
+        // panel, a translocated block reads 3 junctions at 2, 3 and 4 landmarks and
+        // 0 at 1 -- the floor is exactly >= 2, which is what this pins.
+        let s = seqs(40);
+        let a = record_from("a", &s);
+
+        let mut moved: Vec<String> = Vec::with_capacity(s.len());
+        for (i, x) in s.iter().enumerate() {
+            if i == 5 || i == 6 {
+                continue;
+            }
+            moved.push(x.clone());
+            if i == 29 {
+                moved.push(s[5].clone());
+                moved.push(s[6].clone());
+            }
+        }
+        let b = record_from("b", &moved);
+
+        let r = structural_synteny(&a, &b).expect("all tags still shared");
+        assert_eq!(r.shared_tags, 40);
+        assert!(
+            r.breakpoints >= 2,
+            "a two-landmark block keeps its internal adjacency and must stay \
+             detectable; got {} junctions",
+            r.breakpoints
+        );
+    }
+
     #[test]
     fn structural_synteny_detects_an_inversion() {
         let s = seqs(40);

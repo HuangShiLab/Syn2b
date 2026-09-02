@@ -491,7 +491,7 @@ r = +0.982 with APSS was evidence it was measuring the wrong thing.** The
 defensible published claim is that two independent methods place breakpoints at
 the same coordinates (≈1,544,640 / ≈1,945,050) at a ≈2790× cost difference.
 
-### Known open issue — `sub_2`, now diagnosed
+### `sub_2` — diagnosed, and resolved
 
 6 false junctions on the four-enzyme panel under pure substitution. The cause is
 **paralog convergence**, and it is a cross-genome identity failure that neither
@@ -510,16 +510,66 @@ Measured across a six-point ladder (0.1% to 5%): 0 false junctions up to 2%, 6 a
 5%. It is not non-monotonic in load, as previously recorded; it is confined to the
 divergence at which paralog families collapse onto each other.
 
-**A hypothesis that was tested and rejected:** that the 40 bp overlap collapse
-caused it, by splitting runs when a member was lost. Collapsing after the
-shared-tag restriction rather than before does fix a real problem — it recovers
-3.7% more shared landmarks at 5% substitution — but A/B against a46badb over the
-whole ladder leaves the residual at 6 before and 6 after. Do not re-test this.
+### Resolved — the ≥2-landmark relocation rule
 
-**The available fix, and its price.** One landmark moving 1.4 Mb while both its
-neighbours stay put is not a rearrangement; a real translocation moves a block.
-Requiring a relocation to be supported by ≥2 consecutive landmarks would reject
-these, at the cost of raising the translocation detection floor from ≥1 landmark
-to ≥2 — from L50 1,470 bp to roughly the inversion floor of 2,611 bp on BcgI.
-That is a deliberate trade of sensitivity for specificity and should be decided,
-not defaulted into.
+One landmark moving 1.4 Mb while both its neighbours stay put is not a
+rearrangement; a real translocation moves a block. Whatever the block's extent, its
+*internal* adjacencies survive the move, so a landmark at a broken adjacency still
+holds at least one adjacency it had before. A landmark that moved alone holds none.
+That is the discriminator, and it is now applied to the junction count.
+
+It took two clauses, because the artifact does two kinds of damage:
+
+1. **The adjacencies it left behind.** A landmark with adjacencies in both genomes
+   and none in common has moved alone; its broken adjacencies are rejected.
+2. **The adjacency it landed on.** A teleporting landmark also wedges itself between
+   two landmarks that never moved, breaking a third-party adjacency whose endpoints
+   are both innocent — degree 2 in both genomes, each holding a preserved adjacency,
+   at byte-identical positions. Clause 1 cannot see this. So `{x, y}` is also
+   rejected when B's only reason for breaking it is a displaced-alone landmark
+   spliced into the gap.
+
+Clause 2 was not anticipated; it was found by diagnosing what clause 1 left behind.
+On a 5%-substituted E. coli K-12 copy all three residual junctions were of that kind,
+and the three intruders were the same paralog family — `GCGGCTTGAACGCCTTATCCGG…`,
+`GCGGCGCGAACGCCTTATCCGG…`, `GCAGCGTGAACGCCTTATCCGG…`, all sharing the
+`GAACGCCTTATCCGG` tail — arriving from 2,236,540 / 4,108,634 / 2,347,253.
+
+**Measured, four-enzyme panel, E. coli K-12.** Substitution ladder, no rearrangement,
+so every junction is false:
+
+| substitution | HEAD | clause 1 | clauses 1+2 |
+|---|---|---|---|
+| 0.1% – 2% | 0 | 0 | 0 |
+| 3% | 3 | 1 | **0** |
+| 5% | 9 | 3 | **0** |
+
+**The price, measured rather than estimated.** A translocated block, by the number of
+unique landmarks it carries:
+
+| landmarks in block | HEAD | with the rule | SCJ (both) |
+|---|---|---|---|
+| 1 | 3 | **0** | 6 |
+| 2 | 3 | 3 | 6 |
+| 3 | 3 | 3 | 6 |
+| 4 | 3 | 3 | 6 |
+
+The floor is exactly ≥2 landmarks — the predicted cost and no more. Inversions are
+untouched: `breakpoints` = 2R and `scj_distance` = 4R still hold exactly at
+R = 1, 2, 3, 5, because flipping a block does not change the direction-free
+adjacencies inside it, and a single landmark inverting in place does not change the
+adjacency set at all — it moves only the orientation bit, so small inversions were
+never carried by this channel.
+
+Note the last column: **`scj_distance` is unchanged at 6 in every row.** The rule
+filters `breakpoints`, not the adjacency sets, so the 1-landmark translocation is
+declassified rather than erased — it remains visible in the raw symmetric difference.
+This is the same division of labour as under fragmentation, where `breakpoints` is
+immune and SCJ carries a +(K−1) term: **`breakpoints` is the filtered estimator,
+`scj_distance` is the raw set distance.**
+
+**A hypothesis that was tested and rejected** (do not re-test): that the 40 bp overlap
+collapse caused the residual, by splitting runs when a member was lost. Collapsing
+after the shared-tag restriction does fix a real problem — it recovers 3.7% more
+shared landmarks at 5% substitution — but A/B against a46badb over the whole ladder
+left the residual unchanged at 6 before and 6 after.
