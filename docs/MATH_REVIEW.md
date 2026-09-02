@@ -573,11 +573,29 @@ FracMinHash landmarks at matched density (k=31, scale=750, 6,034 landmarks again
 panel's 6,079) gives `scj_distance` 0 at every rung, where the enzyme panel gives 6 at
 3% and 18 at 5%. `breakpoints` is 0 for both — the rule above handles the enzyme path —
 but SCJ is the *unfiltered* symmetric difference, so it still shows the damage the rule
-is hiding. The reason is measured: E. coli K-12 carries 28 Hamming-1 near-duplicate
-pairs under BcgI (0.954%) and 116 under the four-enzyme panel (1.866%), against 0
-(0.000%) for FracMinHash at every density and k tested. Paralog convergence needs
-near-duplicates to converge. **This rule protects the enzyme path from a failure mode
-the sketch path does not have**, which is an argument for the landmark layer being
+is hiding. The mechanism needs a unique landmark sitting one substitution away from a
+**multi-copy family**: the family is dropped by the per-genome uniqueness filter,
+but in a diverged genome, once enough of its copies are destroyed the survivor
+becomes unique and collides with the other locus. Measured on E. coli K-12, counting
+unique landmarks within one substitution of a multi-copy family in either
+orientation:
+
+| source | unique landmarks | multi-copy families | at risk | share |
+|---|---|---|---|---|
+| BcgI | 2,809 | 13 | 7 | 0.249% |
+| four-enzyme panel | 5,889 | 38 | 20 | 0.340% |
+| FracMinHash k=31 s=1582 | 2,776 | 17 | **0** | **0.000%** |
+| FracMinHash k=31 s=750 | 5,880 | 39 | **0** | **0.000%** |
+
+FracMinHash carries just as many genuine multi-copy families — repeats are a property
+of the genome, not of the selection rule — but none of its unique landmarks sits one
+substitution from one. Enzyme landmarks must contain a recognition motif, so they are
+crammed into a far smaller region of sequence space and near-collisions are
+correspondingly likelier; FracMinHash k-mers are drawn from the whole space with no
+shared constraint.
+
+**This rule protects the enzyme path from a failure mode the sketch path does not
+have**, which is an argument for the landmark layer being
 pluggable rather than for the enzyme panel being fixed.
 
 **A hypothesis that was tested and rejected** (do not re-test): that the 40 bp overlap
