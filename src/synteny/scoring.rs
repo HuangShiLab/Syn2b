@@ -5,6 +5,7 @@
 //! correlation on tag order, breakpoint counting, and path-level scoring.
 
 use crate::synteny::graph::TagAdjacencyGraph;
+use crate::enzyme::enzyme::EnzymeType;
 use crate::tgt::record::TgtRecord;
 use crate::tgt::tag::Tag;
 use std::collections::{HashMap, HashSet};
@@ -330,7 +331,42 @@ fn raw_landmarks(record: &TgtRecord) -> Vec<Landmark> {
 /// a46badb over a six-point substitution ladder and rejected: the residual is 6
 /// false junctions before and after, unchanged. See MATH_REVIEW.md for what it
 /// actually is.
-fn collapse_runs(all: Vec<Landmark>) -> Vec<Landmark> {
+/// Landmark source of a record, read from the tags themselves.
+///
+/// The per-tag `enzyme` field already travels through both TGT formats, so this
+/// needs no record-level flag that could disagree with the tags it describes. A
+/// record with no tags reports `Enzyme`, which is the conservative answer: it
+/// changes nothing, because a record with no tags has no runs to collapse.
+fn landmark_source(record: &TgtRecord) -> LandmarkSource {
+    if !record.tags.is_empty()
+        && record.tags.iter().all(|t| t.enzyme == EnzymeType::FracMinHash)
+    {
+        LandmarkSource::FracMinHash
+    } else {
+        LandmarkSource::Enzyme
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LandmarkSource {
+    Enzyme,
+    FracMinHash,
+}
+
+/// Collapse overlapping cut sites to one representative per run.
+///
+/// `collapse` is false for FracMinHash landmarks, and that is not a tuning choice.
+/// Type IIB enzymes recognise a site and cut on both sides of it, so a single
+/// physical locus can produce several tags within `MIN_TAG_SEPARATION`; counting
+/// them separately would inflate the landmark count and let the two genomes
+/// disagree about run structure. FracMinHash evaluates every position
+/// independently against a fixed threshold, so two selected k-mers 20 bp apart are
+/// two genuinely distinct loci. Collapsing them would delete real landmarks — and
+/// silently, since the deletion is symmetric and nothing downstream would object.
+fn collapse_runs(all: Vec<Landmark>, collapse: bool) -> Vec<Landmark> {
+    if !collapse {
+        return all;
+    }
     // Group into runs of landmarks that chain together within MIN_TAG_SEPARATION,
     // then keep one representative per run. Two choices here have to be made
     // reverse-complement symmetric, or the same locus yields different survivors
@@ -452,6 +488,17 @@ fn circular_contigs(
 }
 
 pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<StructuralSynteny> {
+    // Enzyme tags and FracMinHash k-mers are different alphabets of landmark, and
+    // a comparison across them is meaningless rather than merely empty. It would
+    // otherwise fall out as `None` from the shared-set test below, which reads as
+    // "these genomes are unrelated" — the wrong diagnosis for a mode mismatch.
+    // `run_synteny` rejects it earlier with a message; this is the library guard.
+    let source_a = landmark_source(record_a);
+    let source_b = landmark_source(record_b);
+    if source_a != source_b {
+        return None;
+    }
+
     let series_a = raw_landmarks(record_a);
     let series_b = raw_landmarks(record_b);
 
@@ -489,8 +536,8 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         series_b.into_iter().filter(|l| shared.contains(&l.seq)).collect();
     let before_collapse = filtered_a.len() + filtered_b.len();
 
-    let collapsed_a = collapse_runs(filtered_a);
-    let collapsed_b = collapse_runs(filtered_b);
+    let collapsed_a = collapse_runs(filtered_a, source_a == LandmarkSource::Enzyme);
+    let collapsed_b = collapse_runs(filtered_b, source_b == LandmarkSource::Enzyme);
     let collapsed = before_collapse - (collapsed_a.len() + collapsed_b.len());
 
     // Indels shift positions, so a run that chains in one genome can fall apart
@@ -1019,6 +1066,31 @@ mod tests {
     use crate::synteny::graph::TagAdjacencyGraph;
 
     /// Build a record from explicit 32 bp sequences at 1 kb spacing.
+    /// Like `record_from`, but tagging the landmarks with a chosen source and spacing.
+    fn record_with_source(id: &str, seqs: &[String], src: EnzymeType, step: u64) -> TgtRecord {
+        let mut r = TgtRecord::new(id, (seqs.len() as u64 + 1) * step);
+        for (i, s) in seqs.iter().enumerate() {
+            let mut buf = [0u8; 32];
+            let b = s.as_bytes();
+            buf[..b.len()].copy_from_slice(b);
+            r.add_tag(Tag::new(buf, (i as u64 + 1) * step, src, Strand::Forward, 0));
+        }
+        r
+    }
+
+    /// Landmarks at explicit positions, for pinning run-collapse behaviour.
+    fn record_at(id: &str, seqs: &[String], positions: &[u64], src: EnzymeType) -> TgtRecord {
+        assert_eq!(seqs.len(), positions.len());
+        let mut r = TgtRecord::new(id, positions.iter().copied().max().unwrap_or(0) + 1000);
+        for (s, &pos) in seqs.iter().zip(positions) {
+            let mut buf = [0u8; 32];
+            let b = s.as_bytes();
+            buf[..b.len()].copy_from_slice(b);
+            r.add_tag(Tag::new(buf, pos, src, Strand::Forward, 0));
+        }
+        r
+    }
+
     fn record_from(id: &str, seqs: &[String]) -> TgtRecord {
         let mut r = TgtRecord::new(id, (seqs.len() as u64 + 1) * 1000);
         for (i, s) in seqs.iter().enumerate() {
@@ -1122,6 +1194,95 @@ mod tests {
     /// An inversion reverse-complements its segment and reverses tag order.
     /// Canonicalisation keeps the tags matchable; ordered adjacency sees the
     /// reversal.
+    #[test]
+    fn fracminhash_landmarks_drive_the_same_structural_metric() {
+        // The claim the landmark layer rests on: nothing downstream of landmark
+        // extraction knows or cares where the landmarks came from. Same 40-tag
+        // genome, same 20-landmark inversion, tags marked FracMinHash instead of
+        // BcgI -- the answer must be identical, not merely similar.
+        let s = seqs(40);
+        let mut inv: Vec<String> = s.clone();
+        inv[10..30].reverse();
+        for x in inv[10..30].iter_mut() {
+            *x = revcomp(x);
+        }
+
+        let enzyme = structural_synteny(&record_from("a", &s), &record_from("b", &inv))
+            .expect("all tags shared");
+        let sketch = structural_synteny(
+            &record_with_source("a", &s, EnzymeType::FracMinHash, 1000),
+            &record_with_source("b", &inv, EnzymeType::FracMinHash, 1000),
+        )
+        .expect("all landmarks shared");
+
+        assert_eq!(sketch.breakpoints, enzyme.breakpoints, "junction count must match");
+        assert_eq!(sketch.scj_distance, enzyme.scj_distance);
+        assert_eq!(sketch.shared_tags, enzyme.shared_tags);
+        assert_eq!(sketch.inverted_fraction, enzyme.inverted_fraction);
+        assert_eq!(sketch.observable_fraction, enzyme.observable_fraction);
+        assert_eq!(sketch.breakpoints, 2, "one inversion is two junctions either way");
+    }
+
+    #[test]
+    fn fracminhash_landmarks_are_never_collapsed() {
+        // The one place the two sources must diverge, and the reason this is a mode
+        // rather than a drop-in. Landmarks within MIN_TAG_SEPARATION are one
+        // physical locus for a Type IIB enzyme, which cuts on both sides of a site
+        // it recognises once -- so they collapse to a representative. FracMinHash
+        // evaluates each position independently against a fixed threshold, so the
+        // same three positions are three genuine loci and collapsing them would
+        // delete real landmarks, symmetrically and therefore silently.
+        let s = seqs(6);
+        // Three landmarks inside one 40 bp window, then three well separated.
+        let positions = [10_000u64, 10_020, 10_035, 20_000, 21_000, 22_000];
+
+        let e = structural_synteny(
+            &record_at("a", &s, &positions, EnzymeType::BcgI),
+            &record_at("b", &s, &positions, EnzymeType::BcgI),
+        )
+        .expect("self comparison");
+        let f = structural_synteny(
+            &record_at("a", &s, &positions, EnzymeType::FracMinHash),
+            &record_at("b", &s, &positions, EnzymeType::FracMinHash),
+        )
+        .expect("self comparison");
+
+        assert_eq!(
+            e.shared_tags, 4,
+            "the enzyme path must collapse the 40 bp run to one representative"
+        );
+        assert_eq!(
+            f.shared_tags, 6,
+            "the sketch path must keep all three, they are distinct loci"
+        );
+        // Collapsing or not, a genome compared with itself is collinear.
+        assert_eq!(e.breakpoints, 0);
+        assert_eq!(f.breakpoints, 0);
+        assert_eq!(e.scj_distance, 0);
+        assert_eq!(f.scj_distance, 0);
+    }
+
+    #[test]
+    fn landmark_sources_are_not_compared_across() {
+        // An enzyme tag and a FracMinHash k-mer are different alphabets. Left to
+        // the shared-set test this would come out as `None` meaning "unrelated
+        // genomes", which is the wrong diagnosis for a mode mismatch, so it is
+        // rejected explicitly. `run_synteny` reports it with the file names.
+        let s = seqs(20);
+        let enzyme = record_from("a", &s);
+        let sketch = record_with_source("b", &s, EnzymeType::FracMinHash, 1000);
+        assert!(
+            structural_synteny(&enzyme, &sketch).is_none(),
+            "a cross-source comparison must not produce a score"
+        );
+        // Same landmarks, same source: it is only the source that stops it.
+        assert!(structural_synteny(
+            &record_with_source("a", &s, EnzymeType::FracMinHash, 1000),
+            &sketch
+        )
+        .is_some());
+    }
+
     #[test]
     fn a_lone_displaced_landmark_is_not_a_relocation() {
         // The `sub_2` residual. A landmark teleports on its own -- not because

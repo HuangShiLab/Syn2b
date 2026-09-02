@@ -293,3 +293,100 @@ fn test_bcg_i_digest_real_site() {
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0].position, 0);
 }
+
+#[test]
+fn fracminhash_tgt_survives_both_formats_and_still_scores() {
+    // The whole path a real run takes: select landmarks by FracMinHash, write the
+    // TGT, read it back, and score. Both formats matter — the binary one stores the
+    // landmark source as a single byte of `EnzymeType::index()`, and FracMinHash is
+    // index 16, the first value that was never written before this mode existed.
+    // If `from_index` did not round-trip it the tags would come back as an enzyme,
+    // run collapse would silently switch on, and nothing would report an error.
+    use bsyn::landmark::FracMinHash;
+    use bsyn::synteny::scoring::structural_synteny;
+    use bsyn::tgt::{TgtReader, TgtRecord, TgtWriter};
+
+    // Deterministic sequence, then the same sequence with a 4 kb inversion.
+    let mut x: u64 = 20_240_517;
+    let mut next = || {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        b"ACGT"[(x >> 33) as usize % 4]
+    };
+    let seq: Vec<u8> = (0..60_000).map(|_| next()).collect();
+    let rc = |s: &[u8]| -> Vec<u8> {
+        s.iter()
+            .rev()
+            .map(|b| match b {
+                b'A' => b'T',
+                b'T' => b'A',
+                b'C' => b'G',
+                b'G' => b'C',
+                other => *other,
+            })
+            .collect()
+    };
+    let mut inverted = seq.clone();
+    let (lo, hi) = (20_000usize, 24_000usize);
+    inverted[lo..hi].copy_from_slice(&rc(&seq[lo..hi]));
+
+    let fmh = FracMinHash::new(31, 100).unwrap();
+    let build = |id: &str, s: &[u8]| {
+        let mut r = TgtRecord::new(id, s.len() as u64);
+        for t in fmh.landmarks(s, 0, 0) {
+            r.add_tag(t);
+        }
+        r
+    };
+    let a = build("a", &seq);
+    let b = build("b", &inverted);
+    assert!(a.tags.len() > 300, "sanity: got {} landmarks", a.tags.len());
+
+    let direct = structural_synteny(&a, &b).expect("landmarks are shared");
+    assert_eq!(
+        direct.breakpoints, 2,
+        "one inversion is two junctions; got {} at {:?}",
+        direct.breakpoints, direct.junctions
+    );
+
+    let dir = std::env::temp_dir().join("syn2b_fmh_roundtrip");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (label, binary) in [("text", false), ("binary", true)] {
+        let path = dir.join(format!("a_{label}.tgt"));
+        let mut w = TgtWriter::new(&path).unwrap();
+        if binary {
+            w.write_binary(&a).unwrap();
+        } else {
+            w.write_record(&a).unwrap();
+        }
+        drop(w);
+
+        let mut reader = TgtReader::new(&path).unwrap();
+        let back = if binary {
+            reader.read_binary().unwrap().unwrap()
+        } else {
+            reader.read_record().unwrap().unwrap()
+        };
+
+        assert_eq!(back.tags.len(), a.tags.len(), "{label}: tag count");
+        assert!(
+            back.tags
+                .iter()
+                .all(|t| t.enzyme == bsyn::enzyme::EnzymeType::FracMinHash),
+            "{label}: the landmark source must survive the round trip, or run \
+             collapse silently switches on"
+        );
+        let scored = structural_synteny(&back, &b).expect("landmarks are shared");
+        assert_eq!(
+            scored.breakpoints, direct.breakpoints,
+            "{label}: round-tripped record must score identically"
+        );
+        assert_eq!(scored.shared_tags, direct.shared_tags, "{label}: shared tags");
+        assert_eq!(
+            scored.scj_distance, direct.scj_distance,
+            "{label}: scj_distance"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -10,6 +10,7 @@
 
 pub mod enzyme;
 pub mod io;
+pub mod landmark;
 pub mod synteny;
 pub mod tgt;
 pub mod utils;

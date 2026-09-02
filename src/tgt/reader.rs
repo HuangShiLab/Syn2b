@@ -483,6 +483,9 @@ fn parse_enzyme_type(name: &str) -> Result<EnzymeType> {
         "Hin4I" => Ok(EnzymeType::Hin4I),
         "PpiI" => Ok(EnzymeType::PpiI),
         "PsrI" => Ok(EnzymeType::PsrI),
+        // Written by the FracMinHash landmark source; accepted on read so a
+        // sketch TGT round-trips, but never accepted as a `--enzymes` argument.
+        "FMH" | "FracMinHash" => Ok(EnzymeType::FracMinHash),
         other => bail!("Unknown enzyme type: {}", other),
     }
 }

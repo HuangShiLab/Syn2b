@@ -11,6 +11,18 @@ use std::fmt;
 pub enum EnzymeType {
     BcgI, AlfI, AloI, BaeI, BplI, BsaXI, BslFI, Bsp24I,
     CjeI, CjePI, CspCI, FalI, HaeIV, Hin4I, PpiI, PsrI,
+    /// Not a restriction enzyme — the marker for a landmark selected by
+    /// FracMinHash rather than by digestion. It lives in this enum because the
+    /// per-tag `enzyme` field is what already travels through both TGT formats,
+    /// so recording the landmark source here needs no format change and no
+    /// record-level flag that could disagree with the tags it describes.
+    ///
+    /// It is deliberately excluded from `all()` (which means "all enzymes") and
+    /// rejected by the enzyme-name parsers, so it can never be requested as one.
+    /// `properties()` returns a zero-length, pattern-free descriptor: there is no
+    /// recognition site to match, and `digest_genome_contig` must never be called
+    /// with it.
+    FracMinHash,
 }
 
 impl EnzymeType {
@@ -29,6 +41,7 @@ impl EnzymeType {
             EnzymeType::BplI=>4, EnzymeType::BsaXI=>5, EnzymeType::BslFI=>6, EnzymeType::Bsp24I=>7,
             EnzymeType::CjeI=>8, EnzymeType::CjePI=>9, EnzymeType::CspCI=>10, EnzymeType::FalI=>11,
             EnzymeType::HaeIV=>12, EnzymeType::Hin4I=>13, EnzymeType::PpiI=>14, EnzymeType::PsrI=>15,
+            EnzymeType::FracMinHash=>16,
         }
     }
     pub fn from_index(i: u8) -> Option<Self> {
@@ -37,6 +50,7 @@ impl EnzymeType {
             4=>Some(EnzymeType::BplI), 5=>Some(EnzymeType::BsaXI), 6=>Some(EnzymeType::BslFI), 7=>Some(EnzymeType::Bsp24I),
             8=>Some(EnzymeType::CjeI), 9=>Some(EnzymeType::CjePI), 10=>Some(EnzymeType::CspCI), 11=>Some(EnzymeType::FalI),
             12=>Some(EnzymeType::HaeIV), 13=>Some(EnzymeType::Hin4I), 14=>Some(EnzymeType::PpiI), 15=>Some(EnzymeType::PsrI),
+            16=>Some(EnzymeType::FracMinHash),
             _=>None,
         }
     }
@@ -63,6 +77,9 @@ const BASE_MASK: [u8; 256] = {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern { pub anchors: &'static [Anchor], pub iupac: &'static [IupacConstraint] }
+
+/// For `EnzymeType::FracMinHash`, which recognises nothing.
+static NO_PATTERNS: [Pattern; 0] = [];
 
 impl Pattern {
     pub fn matches(&self, window: &[u8]) -> bool {
@@ -97,6 +114,9 @@ impl Enzyme {
             EnzymeType::Hin4I => Enzyme { enzyme_type:t, tag_length:27, patterns:&HIN4I_PATTERNS },
             EnzymeType::PpiI => Enzyme { enzyme_type:t, tag_length:27, patterns:&PPII_PATTERNS },
             EnzymeType::PsrI => Enzyme { enzyme_type:t, tag_length:27, patterns:&PSRI_PATTERNS },
+            // No recognition site: FracMinHash selects on a hash of the k-mer, not
+            // on sequence content. `tag_length` is set by the sketch's k, not here.
+            EnzymeType::FracMinHash => Enzyme { enzyme_type:t, tag_length:0, patterns:&NO_PATTERNS },
         }
     }
 }

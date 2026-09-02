@@ -568,6 +568,18 @@ This is the same division of labour as under fragmentation, where `breakpoints` 
 immune and SCJ carries a +(K−1) term: **`breakpoints` is the filtered estimator,
 `scj_distance` is the raw set distance.**
 
+**And a note on where the residual comes from at all.** Running the same ladder with
+FracMinHash landmarks at matched density (k=31, scale=750, 6,034 landmarks against the
+panel's 6,079) gives `scj_distance` 0 at every rung, where the enzyme panel gives 6 at
+3% and 18 at 5%. `breakpoints` is 0 for both — the rule above handles the enzyme path —
+but SCJ is the *unfiltered* symmetric difference, so it still shows the damage the rule
+is hiding. The reason is measured: E. coli K-12 carries 28 Hamming-1 near-duplicate
+pairs under BcgI (0.954%) and 116 under the four-enzyme panel (1.866%), against 0
+(0.000%) for FracMinHash at every density and k tested. Paralog convergence needs
+near-duplicates to converge. **This rule protects the enzyme path from a failure mode
+the sketch path does not have**, which is an argument for the landmark layer being
+pluggable rather than for the enzyme panel being fixed.
+
 **A hypothesis that was tested and rejected** (do not re-test): that the 40 bp overlap
 collapse caused the residual, by splitting runs when a member was lost. Collapsing
 after the shared-tag restriction does fix a real problem — it recovers 3.7% more

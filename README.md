@@ -20,6 +20,7 @@ adjacency* of those tags are conserved across genomes.
 - [Features](#features)
 - [Repository layout](#repository-layout)
 - [The TGT format](#the-tgt-format)
+- [Landmark sources — 2bRAD or FracMinHash](#landmark-sources--2brad-or-fracminhash)
 - [Type IIB restriction enzymes](#type-iib-restriction-enzymes)
 - [Building](#building)
 - [Command-line usage](#command-line-usage)
@@ -114,7 +115,7 @@ tag as a graph node and each observed adjacency as an edge.
 syn2b/
 ├── Cargo.toml
 ├── src/
-│   ├── main.rs                # CLI entry point (clap): digest / synteny / scaffold / coverage / convert
+│   ├── main.rs                # CLI entry point (clap): digest (--mode 2brad|fracminhash) / synteny / scaffold / coverage / convert
 │   ├── lib.rs                 # public API re-exports (crate name: `bsyn`)
 │   ├── tgt/                   # TGT core data structures
 │   │   ├── tag.rs             # Tag  (32 bp sequence + position + enzyme + strand + contig_id)
@@ -123,8 +124,10 @@ syn2b/
 │   │   ├── writer.rs          # TgtWriter (text + binary output, v2 format)
 │   │   └── reader.rs          # TgtReader (text + binary input, v2 format)
 │   ├── enzyme/                # Restriction-enzyme definitions
-│   │   ├── enzyme.rs          # EnzymeType (16 variants) + Enzyme properties + IUPAC matching
+│   │   ├── enzyme.rs          # EnzymeType (16 enzymes + the FracMinHash marker) + IUPAC matching
 │   │   └── digest.rs          # in silico digestion (pattern matching + tag extraction)
+│   ├── landmark/              # Landmark sources — what the structural metrics consume
+│   │   └── fracminhash.rs     # FracMinHash selection: h(canonical(kmer)) < u64::MAX / scale
 │   ├── synteny/               # Synteny-detection engine
 │   │   ├── graph.rs           # TagAdjacencyGraph, TagNode, AdjacencyEdge
 │   │   ├── scoring.rs         # synteny_score, pairwise matrix, Jaccard, Kendall τ, breakpoints
@@ -202,6 +205,75 @@ cross-checked against gaps recomputed from tag positions.
 
 ---
 
+## Landmark sources — 2bRAD or FracMinHash
+
+Syn2b's structural mathematics never depended on restriction digestion. Every metric
+in `synteny::scoring` consumes only a list of `(canonical identity, position, contig,
+orientation)`, so any rule that picks reproducible loci can drive it. Two are
+available, selected with `digest --mode`:
+
+| | `--mode 2brad` (default) | `--mode fracminhash` |
+|---|---|---|
+| selection | Type IIB restriction sites | `h(canonical(kmer)) < u64::MAX / scale` |
+| density | discrete: 1, 2, 4 or 16 enzymes | continuous, via `--scale` |
+| wet-lab realisable | yes | no — in silico only |
+| run collapse | required | must not be applied |
+
+`--scale` is expected landmark spacing in bp, so `--scale 750` on *E. coli* K-12
+gives 6,034 landmarks against the four-enzyme panel's 6,079 — a matched-density
+comparison. Measured across `--scale` 250 to 2000, observed density tracks
+`4.54 Mb / scale` to within 1.7%.
+
+**Why FracMinHash and not minimizers.** Minimizer selection is window-relative, so a
+single substitution re-selects a whole neighbourhood and landmark identity stops
+being stable across genomes — which an adjacency-based structural metric cannot
+tolerate. FracMinHash is *context-free*: whether a k-mer is kept depends on the k-mer
+alone. It is also genome-independent, unlike bottom-*s* MinHash, whose cutoff is the
+*s*-th smallest hash of that particular genome.
+
+**The one place the modes diverge, and why it is a mode rather than a drop-in.** Type
+IIB enzymes cut on both sides of a site they recognise once, so a single physical
+locus can yield several tags within `MIN_TAG_SEPARATION` and they must be collapsed
+to one representative. FracMinHash evaluates each position independently, so two
+selected k-mers 20 bp apart are two genuine loci; collapsing them would delete real
+landmarks — symmetrically, and therefore silently. `collapse_runs` is gated on the
+source, which is read from the tags themselves rather than from a record-level flag
+that could disagree with them. Comparing a 2bRAD TGT against a FracMinHash TGT is
+refused with a message, not scored as zero similarity.
+
+### Verified equivalence, E. coli K-12
+
+Both sources at ~6,000 landmarks. Every structural control gives the same answer:
+
+| control | 4-enzyme panel | FracMinHash k=31 s=750 | truth |
+|---|---|---|---|
+| self-comparison | 0 bp, 0 SCJ, obs 1.0000 | 0 bp, 0 SCJ, obs 1.0000 | collinear |
+| origin rotation 1.2 Mb | 0 bp, 0 SCJ | 0 bp, 0 SCJ | no change |
+| 500 kb inversion | 2 bp, 4 SCJ, f 0.10919 | 2 bp, 4 SCJ, f 0.11224 | 2, 4, f 0.1101 |
+| 1 / 2 / 3 / 5 inversions | 2/4, 4/8, 6/12, 10/20 | 2/4, 4/8, 6/12, 10/20 | 2R, 4R |
+| 40-contig shatter | 0 bp, obs 0.9930 | 0 bp, obs 0.9934 | 0 bp, K = 40 |
+
+### Where they differ: near-duplicate landmarks
+
+Substitution ladder, no rearrangement, so every junction is false:
+
+| substitution | enzyme bp | enzyme SCJ | enzyme kept | FMH bp | FMH SCJ | FMH kept |
+|---|---|---|---|---|---|---|
+| 0.1% | 0 | 0 | 89.5% | 0 | 0 | 94.6% |
+| 1% | 0 | 0 | 67.7% | 0 | 0 | 71.1% |
+| 3% | 0 | **6** | 36.4% | 0 | **0** | 37.6% |
+| 5% | 0 | **18** | 19.1% | 0 | **0** | 19.0% |
+
+`breakpoints` is 0 for both, because the >=2-landmark relocation rule
+(`docs/MATH_REVIEW.md`) rejects the paralog-convergence artifact. But `scj_distance`
+is the *unfiltered* symmetric difference, and there the enzyme path still carries 6
+and 18 while FracMinHash carries none. The reason is measured: *E. coli* K-12 has 28
+Hamming-1 near-duplicate pairs under BcgI (0.954%) and 116 under the four-enzyme
+panel (1.866%), against **0 (0.000%)** for FracMinHash at every density and *k*
+tested. Paralog convergence needs near-duplicates to converge; the sketch has none.
+So the relocation rule exists to protect the enzyme path from a failure mode the
+sketch path does not have.
+
 ## Type IIB restriction enzymes
 
 Type IIB enzymes cut on **both** sides of their recognition site, excising a
@@ -271,6 +343,10 @@ syn2b digest -i genome.fasta -o genome.tgt
 
 # Digest with all 16 enzymes, writing the compact binary format
 syn2b digest -i genome.fasta -o genome.btgt --enzymes all --format binary
+
+# Select landmarks by FracMinHash instead of by digestion. Same TGT, same
+# downstream analysis; --enzymes is unused and --kmer/--scale apply.
+syn2b digest -i genome.fasta -o genome.tgt --mode fracminhash --kmer 31 --scale 1000
 
 # Compute synteny across a set of TGT records
 syn2b synteny -i tgts/ -o synteny_matrix.csv

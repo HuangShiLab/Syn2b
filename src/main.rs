@@ -13,7 +13,24 @@ struct Cli { #[command(subcommand)] command: Commands }
 
 #[derive(Subcommand)]
 enum Commands {
-    Digest { #[arg(short,long)]input:PathBuf, #[arg(short,long)]output:PathBuf, #[arg(short,long,default_value="BcgI")]enzymes:String, #[arg(short,long,default_value="text")]format:String },
+    /// Extract landmarks from a genome into a TGT.
+    ///
+    /// `--mode 2brad` (default) digests with Type IIB restriction enzymes.
+    /// `--mode fracminhash` selects k-mers by `h(canonical) < u64::MAX / scale`
+    /// instead; `--enzymes` is then unused and `--kmer` / `--scale` apply.
+    Digest {
+        #[arg(short,long)]input:PathBuf,
+        #[arg(short,long)]output:PathBuf,
+        #[arg(short,long,default_value="BcgI")]enzymes:String,
+        #[arg(short,long,default_value="text")]format:String,
+        /// Landmark source: `2brad` or `fracminhash` (aliases: `enzyme`, `fmh`).
+        #[arg(long,default_value="2brad")]mode:String,
+        /// FracMinHash k-mer length, 1..=32. Ignored in 2brad mode.
+        #[arg(long,default_value_t=31)]kmer:usize,
+        /// FracMinHash compression: one k-mer in `scale` is kept, so expected
+        /// landmark spacing is `scale` bp. Ignored in 2brad mode.
+        #[arg(long,default_value_t=1000)]scale:u64,
+    },
     Synteny { #[arg(short,long)]input:PathBuf, #[arg(short,long)]output:PathBuf },
     Coverage { #[arg(short,long)]input:PathBuf, #[arg(short,long,default_value="all")]enzymes:String },
     Convert { #[arg(short,long)]input:PathBuf, #[arg(short,long)]output:PathBuf, #[arg(short,long,default_value="binary")]format:String },
@@ -23,7 +40,13 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Digest{input,output,enzymes,format}=>{run_digest(&input,&output,&parse_enzyme_list(&enzymes)?,&format)?;Ok(())}
+        Commands::Digest{input,output,enzymes,format,mode,kmer,scale}=>{
+            let src=parse_landmark_mode(&mode,kmer,scale)?;
+            // `--enzymes` is only parsed in 2brad mode, so an unknown name is
+            // still an error there but a leftover default is not one here.
+            let ez=match src{LandmarkMode::TwoBRad=>parse_enzyme_list(&enzymes)?,
+                             LandmarkMode::FracMinHash(_)=>Vec::new()};
+            run_digest(&input,&output,&ez,&format,src)?;Ok(())}
         Commands::Synteny{input,output}=>{run_synteny(&input,&output)?;Ok(())}
         Commands::Coverage{input:_,enzymes}=>{println!("Coverage — WIP ({} enzymes)",parse_enzyme_list(&enzymes)?.len());Ok(())}
         Commands::Convert{..}=>{println!("Convert — WIP");Ok(())}
@@ -162,6 +185,8 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     // directly. The graph collapses genomes that share an id, which silently
     // yields a meaningless score, so duplicates are rejected instead.
     let mut records = Vec::new();
+    // (genome_id, is_fracminhash) per record, to reject a mixed-source run.
+    let mut sources: Vec<(String, bool)> = Vec::new();
 
     for path in &tgt_files {
         let mut reader = TgtReader::new(path)?;
@@ -174,7 +199,29 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
                     genome_id
                 );
             }
-            println!("  Adding genome: {} ({} tags)", genome_id, record.tags.len());
+            // Enzyme tags and FracMinHash k-mers are different alphabets of
+            // landmark. Mixing them in one run is not a comparison that yields a
+            // small number — it yields an empty intersection, which reads as
+            // "unrelated genomes" and is the wrong diagnosis. Caught here, where
+            // the file names are still in hand to name in the message.
+            let fmh = !record.tags.is_empty()
+                && record.tags.iter().all(|t| t.enzyme == EnzymeType::FracMinHash);
+            if let Some((first_id, first_fmh)) = sources.first() {
+                if *first_fmh != fmh {
+                    let name = |f: bool| if f { "FracMinHash" } else { "2bRAD enzyme" };
+                    anyhow::bail!(
+                        "landmark sources differ: {:?} is {}, {:?} is {}. \
+                         The two select different kinds of landmark and share none, \
+                         so a comparison across them would report no similarity \
+                         rather than an error. Re-run `digest` on both with the same \
+                         --mode.",
+                        first_id, name(*first_fmh), genome_id, name(fmh)
+                    );
+                }
+            }
+            sources.push((genome_id.clone(), fmh));
+            println!("  Adding genome: {} ({} {})", genome_id, record.tags.len(),
+                     if fmh { "FracMinHash landmarks" } else { "tags" });
             graph.add_genome(&genome_id, &record);
             genome_ids.push(genome_id);
             records.push(record);
@@ -285,7 +332,7 @@ fn load_single_tgt(p:&PathBuf)->Result<TgtRecord>{
 
 // ── Digest ──────────────────────────────────────────────────────────────────
 
-fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<()>{
+fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str,src:LandmarkMode)->Result<()>{
     use bsyn::io::fasta::FastaReader;
     use bsyn::tgt::TgtWriter;
     let bin=fmt=="binary";
@@ -297,12 +344,22 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<
         if gid.is_empty(){gid=rec.id.clone();}
         let sl=rec.sequence.len() as u64;tot+=sl;names.push(rec.id.clone());
         circular.push(header_says_circular(&rec.id,rec.description.as_deref()));
-        use rayon::prelude::*;
-        let enzyme_tags: Vec<Vec<Tag>> = enzymes
-            .par_iter()
-            .map(|&e| bsyn::enzyme::digest::digest_genome_contig(&rec.sequence, e, cid, off))
-            .collect();
-        for t in enzyme_tags { all_tags.extend(t); }
+        match src{
+            LandmarkMode::TwoBRad=>{
+                use rayon::prelude::*;
+                let enzyme_tags: Vec<Vec<Tag>> = enzymes
+                    .par_iter()
+                    .map(|&e| bsyn::enzyme::digest::digest_genome_contig(&rec.sequence, e, cid, off))
+                    .collect();
+                for t in enzyme_tags { all_tags.extend(t); }
+            }
+            // Not parallelised over anything: the rolling encoder is a single pass
+            // that must carry state across the contig, and contigs are already the
+            // unit of the outer loop.
+            LandmarkMode::FracMinHash(f)=>{
+                all_tags.extend(f.landmarks(&rec.sequence, cid, off));
+            }
+        }
         off+=sl;cid+=1;
     }
     let mut rec=TgtRecord::new(&gid,tot);
@@ -316,8 +373,12 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<
     while let Some(fr)=r2.next_record()?{rec.contig_offsets.push(o);o+=fr.sequence.len()as u64;}
     if bin{tw.write_binary(&rec)?;}else{tw.write_record(&rec)?;}
     let n_circ=rec.contig_circular.iter().filter(|&&c|c).count();
-    println!("Digested {} contigs ({} circular), {} bp, {} tags -> {:?}",
-        rec.contig_names.len(),n_circ,tot,rec.tags.len(),out);
+    let what=match src{
+        LandmarkMode::TwoBRad=>format!("{} enzyme(s)",enzymes.len()),
+        LandmarkMode::FracMinHash(f)=>format!("FracMinHash k={} scale={}",f.k,f.scale),
+    };
+    println!("Digested {} contigs ({} circular), {} bp, {} landmarks [{}] -> {:?}",
+        rec.contig_names.len(),n_circ,tot,rec.tags.len(),what,out);
     Ok(())
 }
 
@@ -341,6 +402,24 @@ fn header_says_circular(id:&str,desc:Option<&str>)->bool{
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Which rule picks the landmarks.
+///
+/// The two are not interchangeable inside one TGT: `structural_synteny` refuses a
+/// comparison across sources, because enzyme tags and FracMinHash k-mers are
+/// different alphabets of landmark and an empty intersection between them would
+/// otherwise read as "unrelated genomes".
+#[derive(Clone,Copy,Debug)]
+enum LandmarkMode{TwoBRad,FracMinHash(bsyn::landmark::FracMinHash)}
+
+fn parse_landmark_mode(mode:&str,k:usize,scale:u64)->Result<LandmarkMode>{
+    match mode.to_ascii_lowercase().as_str(){
+        "2brad"|"enzyme"|"digest"=>Ok(LandmarkMode::TwoBRad),
+        "fracminhash"|"fmh"|"sketch"=>
+            Ok(LandmarkMode::FracMinHash(bsyn::landmark::FracMinHash::new(k,scale)?)),
+        other=>anyhow::bail!("Unknown --mode {:?} (expected `2brad` or `fracminhash`)",other),
+    }
+}
+
 fn parse_enzyme_list(s:&str)->Result<Vec<EnzymeType>>{
     if s=="all"{return Ok(EnzymeType::all().to_vec());}
     let mut v=Vec::new();
@@ -352,6 +431,8 @@ fn parse_enzyme_name(n:&str)->Result<EnzymeType>{
         "BplI"=>Ok(EnzymeType::BplI),"BsaXI"=>Ok(EnzymeType::BsaXI),"BslFI"=>Ok(EnzymeType::BslFI),"Bsp24I"=>Ok(EnzymeType::Bsp24I),
         "CjeI"=>Ok(EnzymeType::CjeI),"CjePI"=>Ok(EnzymeType::CjePI),"CspCI"=>Ok(EnzymeType::CspCI),"FalI"=>Ok(EnzymeType::FalI),
         "HaeIV"=>Ok(EnzymeType::HaeIV),"Hin4I"=>Ok(EnzymeType::Hin4I),"PpiI"=>Ok(EnzymeType::PpiI),"PsrI"=>Ok(EnzymeType::PsrI),
+        "FracMinHash"|"FMH"=>anyhow::bail!(
+            "FracMinHash is a landmark source, not an enzyme — use `--mode fracminhash`"),
         _=>anyhow::bail!("Unknown enzyme: {}",n)}
 }
 
