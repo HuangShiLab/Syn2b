@@ -39,20 +39,21 @@ impl TgtWriter {
         Ok(())
     }
 
-    /// Write a single TGT record in binary format (v2).
+    /// Write a single TGT record in binary format (v3).
     ///
-    /// Binary format v2 layout:
+    /// Binary format v3 layout:
     /// - Header (48 bytes): magic "TGT\x02", version, genome length, tag count, enzyme count, contig count
     /// - Genome ID (variable): u16 length + bytes
     /// - Tag table (N x 48 bytes each): sequence, position, enzyme index, strand, contig_id
     /// - Gap table ((N-1) x 4 bytes each): gap sizes
     /// - Contig name table (variable): for each contig, u16 name_len + name bytes
+    /// - Contig topology table (v3+): one byte per contig, 1 = circular
     pub fn write_binary(&mut self, record: &TgtRecord) -> Result<()> {
         // --- Header (48 bytes) ---
         let magic = b"TGT\x02";
         self.writer.write_all(magic)?; // bytes 0..4
 
-        let version: u32 = 2;
+        let version: u32 = 3;
         self.writer.write_all(&version.to_le_bytes())?; // bytes 4..8
 
         self.writer
@@ -110,6 +111,12 @@ impl TgtWriter {
             let name_len = name_bytes.len() as u16;
             self.writer.write_all(&name_len.to_le_bytes())?;
             self.writer.write_all(name_bytes)?;
+        }
+
+        // --- Contig topology table (v3) ---
+        for i in 0..record.contig_names.len() {
+            let circular = record.contig_circular.get(i).copied().unwrap_or(false);
+            self.writer.write_all(&[circular as u8])?;
         }
 
         self.writer.flush().context("Failed to flush binary TGT data")?;
@@ -190,8 +197,8 @@ mod tests {
         // Check magic
         assert_eq!(&buf[0..4], b"TGT\x02");
 
-        // Check version
-        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 2);
+        // Check version (3 added the per-contig topology table)
+        assert_eq!(u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]), 3);
 
         // Check genome length
         assert_eq!(

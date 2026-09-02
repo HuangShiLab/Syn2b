@@ -291,11 +291,12 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<
     let bin=fmt=="binary";
     let mut tw=TgtWriter::new(out)?;
     let mut r=FastaReader::new(inp)?;
-    let mut cid=1u16;let mut off=0u64;let mut names=Vec::new();
+    let mut cid=1u16;let mut off=0u64;let mut names=Vec::new();let mut circular=Vec::new();
     let mut all_tags:Vec<Tag>=Vec::new();let mut gid=String::new();let mut tot=0u64;
     while let Some(rec)=r.next_record()?{
         if gid.is_empty(){gid=rec.id.clone();}
         let sl=rec.sequence.len() as u64;tot+=sl;names.push(rec.id.clone());
+        circular.push(header_says_circular(&rec.id,rec.description.as_deref()));
         use rayon::prelude::*;
         let enzyme_tags: Vec<Vec<Tag>> = enzymes
             .par_iter()
@@ -307,11 +308,35 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str)->Result<
     let mut rec=TgtRecord::new(&gid,tot);
     for t in all_tags{rec.add_tag(t);}
     rec.contig_names=names;
+    // All-false means the headers said nothing, which must stay distinguishable
+    // from "every contig is linear" — closure falls back to the single-contig
+    // rule only when the topology is unknown.
+    if circular.iter().any(|&c|c){rec.contig_circular=circular;}
     let mut r2=FastaReader::new(inp)?;let mut o=0u64;
     while let Some(fr)=r2.next_record()?{rec.contig_offsets.push(o);o+=fr.sequence.len()as u64;}
     if bin{tw.write_binary(&rec)?;}else{tw.write_record(&rec)?;}
-    println!("Digested {} contigs, {} bp, {} tags -> {:?}",rec.contig_names.len(),tot,rec.tags.len(),out);
+    let n_circ=rec.contig_circular.iter().filter(|&&c|c).count();
+    println!("Digested {} contigs ({} circular), {} bp, {} tags -> {:?}",
+        rec.contig_names.len(),n_circ,tot,rec.tags.len(),out);
     Ok(())
+}
+
+/// Whether a FASTA header declares the sequence circular.
+///
+/// Long-read assemblers say so in the header, but each in its own words: Flye and
+/// Unicycler write `circular=true`, Canu writes `suggestCircular=yes`, and the
+/// INSDC/NCBI convention is `[topology=circular]`. Some pipelines only append
+/// `_circular` to the name. A header that says nothing leaves the topology
+/// unknown, which is not the same as linear.
+fn header_says_circular(id:&str,desc:Option<&str>)->bool{
+    let hay=format!("{} {}",id,desc.unwrap_or("")).to_ascii_lowercase();
+    for key in ["circular=true","circular=yes","suggestcircular=yes",
+                "topology=circular","completeness=complete circular"]{
+        if hay.contains(key){return true;}
+    }
+    // bare word forms: `[circular]`, trailing `_circular`, ` circular` as a token
+    hay.split(|c:char|!c.is_ascii_alphanumeric()).any(|t|t=="circular")
+        && !hay.contains("circular=false") && !hay.contains("circular=no")
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

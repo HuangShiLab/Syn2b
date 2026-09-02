@@ -292,10 +292,9 @@ fn undirected(a: [u8; 32], b: [u8; 32]) -> Adjacency {
     }
 }
 
-/// Landmarks in genome order, with overlapping cut sites collapsed to one
-/// representative per run. Sorting is defensive: callers should not have to
-/// guarantee it.
-fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
+/// Landmarks in genome order, one per tag. Sorting is defensive: callers should
+/// not have to guarantee it.
+fn raw_landmarks(record: &TgtRecord) -> Vec<Landmark> {
     let mut all: Vec<Landmark> = record
         .tags
         .iter()
@@ -308,7 +307,30 @@ fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
         })
         .collect();
     all.sort_by_key(|lm| (lm.contig, lm.pos));
+    all
+}
 
+/// Collapse overlapping cut sites to one representative per run.
+///
+/// **Called after the shared-tag restriction, not before.** The run boundaries
+/// are found by chaining against the previous landmark, and the representative is
+/// the smallest canonical sequence in the run, so both depend on which members
+/// are present. Collapsing first meant each genome collapsed its *own* tag set:
+/// a tag the other genome had lost could still decide the representative, and the
+/// two genomes then disagreed about a locus they both carried. Restricting first
+/// makes the run structure agree by construction.
+///
+/// Measured on E. coli K-12 against a 5%-substituted copy, four-enzyme panel:
+/// shared landmarks 1,230 -> 1,276 (+3.7%), and +1% to +2% across the rest of the
+/// ladder. `landmarks_collapsed` now counts collapses among shared landmarks only,
+/// so it reads much lower than before (610 -> 50 at 5%); it is a diagnostic, not
+/// a rate.
+///
+/// This is **not** the `sub_2` residual. That hypothesis was tested by A/B against
+/// a46badb over a six-point substitution ladder and rejected: the residual is 6
+/// false junctions before and after, unchanged. See MATH_REVIEW.md for what it
+/// actually is.
+fn collapse_runs(all: Vec<Landmark>) -> Vec<Landmark> {
     // Group into runs of landmarks that chain together within MIN_TAG_SEPARATION,
     // then keep one representative per run. Two choices here have to be made
     // reverse-complement symmetric, or the same locus yields different survivors
@@ -342,7 +364,21 @@ fn landmark_series(record: &TgtRecord) -> Vec<Landmark> {
 
 /// Adjacency set of a landmark series, each mapped to the position of its left
 /// landmark so a broken adjacency can be reported as a coordinate.
-fn adjacency_set(series: &[Landmark], circular: bool) -> HashMap<Adjacency, u64> {
+///
+/// Closure is decided **per contig**, not per genome. A long-read assembly is
+/// typically a closed chromosome plus one or two closed plasmids, and a
+/// genome-wide rule leaves all of them open, so the origin of each replicon stops
+/// being normalised.
+///
+/// Measured on E. coli K-12 split into a 4.0 Mb "chromosome" and a 0.64 Mb
+/// "plasmid", both closed, compared against itself with each replicon's origin
+/// rotated: with the topology declared, SCJ 0 and `observable_fraction` 1.0000;
+/// without it, SCJ 4 (two moved seams, counted in both genomes) and 0.9993 over
+/// 2,802 of 2,806 adjacencies. The junction count survives either way — a moved
+/// seam lands on a contig end in the other genome, where the
+/// positive-contradiction rule declines to call it broken — so the cost falls on
+/// `scj_distance`, which is deliberately uncorrected, and on the power discount.
+fn adjacency_set(series: &[Landmark], circular: &HashSet<u16>) -> HashMap<Adjacency, u64> {
     let mut adj = HashMap::with_capacity(series.len());
     for w in series.windows(2) {
         if w[0].contig != w[1].contig {
@@ -350,27 +386,74 @@ fn adjacency_set(series: &[Landmark], circular: bool) -> HashMap<Adjacency, u64>
         }
         adj.insert(undirected(w[0].seq, w[1].seq), w[0].pos);
     }
-    if circular && series.len() >= 3 {
-        let last = series[series.len() - 1];
-        adj.insert(undirected(last.seq, series[0].seq), last.pos);
+    // `series` is sorted by (contig, pos), so each contig is one run.
+    let mut i = 0usize;
+    while i < series.len() {
+        let contig = series[i].contig;
+        let mut j = i;
+        while j + 1 < series.len() && series[j + 1].contig == contig {
+            j += 1;
+        }
+        if circular.contains(&contig) && j - i + 1 >= 3 {
+            adj.insert(undirected(series[j].seq, series[i].seq), series[j].pos);
+        }
+        i = j + 1;
     }
     adj
 }
 
-/// True when every landmark sits on one contig, the case where closing the
-/// series into a cycle is the right thing to do.
-fn single_contig(series: &[Landmark]) -> bool {
-    match series.first() {
-        None => false,
-        Some(first) => series.iter().all(|lm| lm.contig == first.contig),
+fn contigs_of(series: &[Landmark]) -> HashSet<u16> {
+    series.iter().map(|lm| lm.contig).collect()
+}
+
+/// The contigs each genome should close, for one pairwise comparison.
+///
+/// Two regimes, and the split is deliberate.
+///
+/// When **both** records carry declared topology, each genome closes exactly the
+/// contigs its assembler called circular. This is the long-read case and the one
+/// the per-contig closure exists for.
+///
+/// When **either** record is silent — every TGT written before the field existed
+/// — both fall back to the original rule: close only when each genome is a single
+/// contig. Deciding per genome instead would change legacy results, because a
+/// closed genome compared against a draft would gain its seam adjacency and shift
+/// `observable_fraction` from `1 − (K−1)/S` to `1 − K/S`. That is arguably the
+/// truer number, but it is not a change to make silently on the strength of an
+/// absent field.
+fn circular_contigs(
+    record_a: &TgtRecord,
+    kept_a: &[Landmark],
+    record_b: &TgtRecord,
+    kept_b: &[Landmark],
+) -> (HashSet<u16>, HashSet<u16>) {
+    let declared = |record: &TgtRecord, series: &[Landmark]| -> HashSet<u16> {
+        contigs_of(series)
+            .into_iter()
+            .filter(|&c| {
+                // contig_id 0 means "unspecified / single contig"; 1+ indexes the table
+                let idx = if c == 0 { 0 } else { c as usize - 1 };
+                record.contig_circular.get(idx).copied().unwrap_or(false)
+            })
+            .collect()
+    };
+
+    if !record_a.contig_circular.is_empty() && !record_b.contig_circular.is_empty() {
+        return (declared(record_a, kept_a), declared(record_b, kept_b));
+    }
+
+    let a = contigs_of(kept_a);
+    let b = contigs_of(kept_b);
+    if a.len() == 1 && b.len() == 1 {
+        (a, b)
+    } else {
+        (HashSet::new(), HashSet::new())
     }
 }
 
 pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<StructuralSynteny> {
-    let series_a = landmark_series(record_a);
-    let series_b = landmark_series(record_b);
-    let collapsed =
-        (record_a.tags.len() - series_a.len()) + (record_b.tags.len() - series_b.len());
+    let series_a = raw_landmarks(record_a);
+    let series_b = raw_landmarks(record_b);
 
     // A canonical sequence occurring at several loci cannot be assigned to one
     // of them, so it carries no usable order information and every copy
@@ -397,19 +480,49 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         return None;
     }
 
-    // Keep only shared landmarks, preserving each genome's own order.
-    let kept_a: Vec<Landmark> =
+    // Keep only shared landmarks, preserving each genome's own order — and do it
+    // *before* collapsing overlapping cut sites, so both genomes collapse the
+    // same tag set and cannot disagree about run structure. See `collapse_runs`.
+    let filtered_a: Vec<Landmark> =
         series_a.into_iter().filter(|l| shared.contains(&l.seq)).collect();
-    let kept_b: Vec<Landmark> =
+    let filtered_b: Vec<Landmark> =
         series_b.into_iter().filter(|l| shared.contains(&l.seq)).collect();
+    let before_collapse = filtered_a.len() + filtered_b.len();
 
-    // Only close the cycle when both genomes are single-contig. Against a draft
-    // assembly there is no origin to normalise and the closure would invent an
-    // adjacency across the gap between the first and last contig.
-    let circular = single_contig(&kept_a) && single_contig(&kept_b);
+    let collapsed_a = collapse_runs(filtered_a);
+    let collapsed_b = collapse_runs(filtered_b);
+    let collapsed = before_collapse - (collapsed_a.len() + collapsed_b.len());
 
-    let adj_a = adjacency_set(&kept_a, circular);
-    let adj_b = adjacency_set(&kept_b, circular);
+    // Indels shift positions, so a run that chains in one genome can fall apart
+    // in the other and pick a different representative. Re-intersect to restore
+    // the invariant every downstream step assumes: the two series carry exactly
+    // the same set of sequences, and any difference between them is order.
+    let surviving: HashSet<[u8; 32]> = collapsed_a
+        .iter()
+        .map(|l| l.seq)
+        .collect::<HashSet<_>>()
+        .intersection(&collapsed_b.iter().map(|l| l.seq).collect::<HashSet<_>>())
+        .copied()
+        .collect();
+    if surviving.len() < 2 {
+        return None;
+    }
+    let kept_a: Vec<Landmark> =
+        collapsed_a.into_iter().filter(|l| surviving.contains(&l.seq)).collect();
+    let kept_b: Vec<Landmark> =
+        collapsed_b.into_iter().filter(|l| surviving.contains(&l.seq)).collect();
+
+    // Closure is per contig, from the topology the assembler recorded.
+    let (circ_a, circ_b) = circular_contigs(record_a, &kept_a, record_b, &kept_b);
+    // Reported as a single flag for compatibility: true when every contig that
+    // carries landmarks, in both genomes, is closed.
+    let circular = !circ_a.is_empty()
+        && circ_a.len() == contigs_of(&kept_a).len()
+        && !circ_b.is_empty()
+        && circ_b.len() == contigs_of(&kept_b).len();
+
+    let adj_a = adjacency_set(&kept_a, &circ_a);
+    let adj_b = adjacency_set(&kept_b, &circ_b);
     if adj_a.is_empty() && adj_b.is_empty() {
         return None;
     }
@@ -496,7 +609,7 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
 
     Some(StructuralSynteny {
         score: conserved as f64 / union as f64,
-        shared_tags: shared.len(),
+        shared_tags: surviving.len(),
         repeats_dropped: (ca.len() - unique_a.len()) + (cb.len() - unique_b.len()),
         landmarks_collapsed: collapsed,
         circular,
@@ -504,7 +617,7 @@ pub fn structural_synteny(record_a: &TgtRecord, record_b: &TgtRecord) -> Option<
         breakpoints: junctions.len(),
         scj_distance: adj_a.len() + adj_b.len() - 2 * conserved,
         // Normalised so genomes of different landmark density stay comparable.
-        breakpoint_density: junctions.len() as f64 / shared.len() as f64,
+        breakpoint_density: junctions.len() as f64 / surviving.len() as f64,
         junctions,
         orientation_uninformative,
         observable_adjacencies: observable,
@@ -1004,6 +1117,121 @@ mod tests {
             .expect("rotation keeps every tag");
         assert!(r.circular, "single-contig genomes must be closed into cycles");
         assert_eq!(r.breakpoints, 0, "got {} junctions", r.breakpoints);
+    }
+
+    #[test]
+    fn invariance_closed_multi_replicon_origin_rotation() {
+        // A long-read assembly is normally a closed chromosome plus closed
+        // plasmids. Rotating each replicon's origin must change nothing. A
+        // genome-wide rule sees two contigs and declines to close either, which
+        // leaves the moved seams in the symmetric difference: on real E. coli
+        // split into two closed replicons that costs SCJ 4 and drops
+        // observable_fraction to 0.9993. Junctions are protected either way by
+        // the positive-contradiction rule, so SCJ is what this asserts on.
+        let s = seqs(40);
+        let chrom: Vec<String> = s[..28].to_vec();
+        let plasmid: Vec<String> = s[28..].to_vec();
+
+        let build = |id: &str, chrom_off: usize, plasmid_off: usize| {
+            let mut r = TgtRecord::new(id, 60_000);
+            r.contig_names = vec!["chromosome".into(), "plasmid".into()];
+            r.contig_circular = vec![true, true];
+            let mut push = |r: &mut TgtRecord, seqs: &[String], off: usize, contig: u16| {
+                for i in 0..seqs.len() {
+                    let seq = &seqs[(i + off) % seqs.len()];
+                    let mut buf = [0u8; 32];
+                    buf[..seq.len()].copy_from_slice(seq.as_bytes());
+                    r.add_tag(Tag::new(
+                        buf,
+                        (i as u64 + 1) * 1000,
+                        EnzymeType::BcgI,
+                        Strand::Forward,
+                        contig,
+                    ));
+                }
+            };
+            push(&mut r, &chrom, chrom_off, 1);
+            push(&mut r, &plasmid, plasmid_off, 2);
+            r
+        };
+
+        let r = structural_synteny(&build("a", 0, 0), &build("b", 9, 4))
+            .expect("rotation keeps every tag");
+        assert!(r.circular, "both replicons are declared circular");
+        assert_eq!(r.breakpoints, 0, "got {} junction(s)", r.breakpoints);
+        assert_eq!(
+            r.scj_distance, 0,
+            "rotating a closed replicon must not move its seam, got {}",
+            r.scj_distance
+        );
+        assert!(
+            (r.observable_fraction - 1.0).abs() < 1e-9,
+            "closed replicons hide no adjacency, got {}",
+            r.observable_fraction
+        );
+
+        // Without the declaration the same pair falls back to the genome-wide
+        // rule, and the seams reappear. This is the defect, held in place.
+        let (mut a, mut b) = (build("a", 0, 0), build("b", 9, 4));
+        a.contig_circular.clear();
+        b.contig_circular.clear();
+        let undeclared = structural_synteny(&a, &b).expect("same tags");
+        assert!(!undeclared.circular);
+        assert!(
+            undeclared.scj_distance > 0,
+            "undeclared topology should leave the seams in the symmetric difference"
+        );
+    }
+
+    #[test]
+    fn unshared_tag_does_not_split_a_collapse_run() {
+        // Overlapping cut sites are collapsed to one representative per run, and
+        // the run boundaries are found by chaining against the previous landmark.
+        // A tag lost to a substitution or a sequencing error can therefore split
+        // one run into two, yielding two representatives where the other genome
+        // yields one — an extra landmark, an extra adjacency, and a junction that
+        // no rearrangement produced. This is the `sub_2` residual.
+        //
+        // Collapsing after the shared-tag restriction removes the mechanism.
+        // Checked for every choice of which run member is missing, since the
+        // damaging case is the one where the lost tag was the representative.
+        let s = seqs(12);
+        let run_positions = [10_000u64, 10_020, 10_040]; // chained under 40 bp
+        let solo_positions = [1_000u64, 2_000, 3_000, 20_000, 21_000];
+
+        let build = |id: &str, skip: Option<usize>| {
+            let mut r = TgtRecord::new(id, 40_000);
+            let mut add = |r: &mut TgtRecord, seq: &str, pos: u64| {
+                let mut buf = [0u8; 32];
+                buf[..seq.len()].copy_from_slice(seq.as_bytes());
+                r.add_tag(Tag::new(buf, pos, EnzymeType::BcgI, Strand::Forward, 1));
+            };
+            for (i, pos) in solo_positions.iter().take(3).enumerate() {
+                add(&mut r, &s[i], *pos);
+            }
+            for (i, pos) in run_positions.iter().enumerate() {
+                if Some(i) == skip {
+                    continue; // the tag a substitution destroyed
+                }
+                add(&mut r, &s[3 + i], *pos);
+            }
+            for (i, pos) in solo_positions.iter().skip(3).enumerate() {
+                add(&mut r, &s[6 + i], *pos);
+            }
+            r
+        };
+
+        let a = build("a", None);
+        for missing in 0..run_positions.len() {
+            let b = build("b", Some(missing));
+            let r = structural_synteny(&a, &b)
+                .unwrap_or_else(|| panic!("missing={missing} left too few shared tags"));
+            assert_eq!(
+                r.breakpoints, 0,
+                "losing run member {missing} manufactured {} junction(s)",
+                r.breakpoints
+            );
+        }
     }
 
     #[test]

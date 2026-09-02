@@ -19,6 +19,16 @@ pub struct TgtRecord {
     pub adjacency_set: HashSet<([u8; 32], [u8; 32])>,
     pub contig_names: Vec<String>,   // contig_id 1+ index here; contig_id 0 means single contig / not specified
     pub contig_offsets: Vec<u64>,  // cumulative length of contigs up to index i
+    /// Per-contig topology, parallel to `contig_names`. Empty when the source
+    /// said nothing, which is what every TGT written before this field existed
+    /// looks like; consumers must treat empty as "unknown", not as "all linear".
+    ///
+    /// It matters because closure is per contig: a long-read assembly is usually
+    /// a closed chromosome plus closed plasmids, and without this the whole
+    /// genome is treated as linear and the chromosome's origin stops being
+    /// normalised.
+    #[serde(default)]
+    pub contig_circular: Vec<bool>,
 }
 
 impl TgtRecord {
@@ -33,6 +43,7 @@ impl TgtRecord {
             adjacency_set: HashSet::new(),
             contig_names: Vec::new(),
             contig_offsets: Vec::new(),
+            contig_circular: Vec::new(),
         }
     }
 
@@ -122,7 +133,11 @@ impl fmt::Display for TgtRecord {
                     self.total_length
                 };
                 let len = end - start;
-                contig_parts.push(format!("{}:{}", self.contig_names[i], len));
+                if self.contig_circular.get(i).copied().unwrap_or(false) {
+                    contig_parts.push(format!("{}:{}:circular", self.contig_names[i], len));
+                } else {
+                    contig_parts.push(format!("{}:{}", self.contig_names[i], len));
+                }
             }
             writeln!(f, "#contigs={}", contig_parts.join(";"))?;
         }

@@ -88,6 +88,7 @@ impl TgtReader {
     ///
     /// Binary format v2 layout:
     /// - Header (48 bytes): magic "TGT\x02", version, genome length, tag count, enzyme count, contig count
+    /// - v3 appends a per-contig topology byte after the contig name table
     /// - Genome ID (variable): u16 length + bytes
     /// - Tag table (N x 48 bytes each)
     /// - Gap table ((N-1) x 4 bytes each)
@@ -125,8 +126,8 @@ impl TgtReader {
         let version = u32::from_le_bytes([
             header_buf[4], header_buf[5], header_buf[6], header_buf[7],
         ]);
-        if version != 2 {
-            bail!("Unsupported binary TGT version: {} (expected 2)", version);
+        if version != 2 && version != 3 {
+            bail!("Unsupported binary TGT version: {} (expected 2 or 3)", version);
         }
 
         // Parse genome length
@@ -239,6 +240,17 @@ impl TgtReader {
                 .unwrap_or_default();
             record.contig_names.push(name);
         }
+
+        // Topology table (format v3 and later). v2 files stop after the names,
+        // and an absent table means unknown rather than linear.
+        if version >= 3 {
+            let mut flags = vec![0u8; contig_count as usize];
+            self.reader.read_exact(&mut flags)
+                .context("Failed to read contig topology table")?;
+            if flags.iter().any(|&f| f != 0) {
+                record.contig_circular = flags.into_iter().map(|f| f != 0).collect();
+            }
+        }
         // contig_offsets are not stored in the binary format; leave empty
 
         Ok(Some(record))
@@ -321,7 +333,11 @@ fn parse_header(line: &str) -> Result<(String, u64)> {
     Ok((genome_id, total_length))
 }
 
-/// Parse a contig metadata comment line of the form `#contigs=name1:len1;name2:len2;...`
+/// Parse a contig metadata comment line of the form
+/// `#contigs=name1:len1[:circular];name2:len2[:circular];...`
+///
+/// The topology field is optional and was added after the format shipped, so its
+/// absence means "unknown" rather than "linear".
 fn parse_contig_comment(line: &str, record: &mut TgtRecord) -> Result<()> {
     let content = line.trim();
     if let Some(val) = content.strip_prefix("#contigs=") {
@@ -329,12 +345,17 @@ fn parse_contig_comment(line: &str, record: &mut TgtRecord) -> Result<()> {
         for part in val.split(';') {
             let part = part.trim();
             if part.is_empty() { continue; }
-            let mut split = part.splitn(2, ':');
+            let mut split = part.splitn(3, ':');
             let name = split.next().unwrap_or("").trim().to_string();
             let len = split.next().unwrap_or("0").trim().parse::<u64>().unwrap_or(0);
+            let circular = matches!(split.next().map(str::trim), Some("circular"));
             record.contig_names.push(name);
             record.contig_offsets.push(offset);
+            record.contig_circular.push(circular);
             offset += len;
+        }
+        if record.contig_circular.iter().all(|&c| !c) {
+            record.contig_circular.clear();   // no information, not "all linear"
         }
     }
     Ok(())
