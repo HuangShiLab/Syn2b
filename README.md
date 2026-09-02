@@ -21,6 +21,7 @@ adjacency* of those tags are conserved across genomes.
 - [Repository layout](#repository-layout)
 - [The TGT format](#the-tgt-format)
 - [Landmark sources — 2bRAD or FracMinHash](#landmark-sources--2brad-or-fracminhash)
+  - [Full comparison: `docs/LANDMARK_COMPARISON.md`](docs/LANDMARK_COMPARISON.md)
 - [Type IIB restriction enzymes](#type-iib-restriction-enzymes)
 - [Building](#building)
 - [Command-line usage](#command-line-usage)
@@ -206,6 +207,9 @@ cross-checked against gaps recomputed from tag positions.
 ---
 
 ## Landmark sources — 2bRAD or FracMinHash
+
+> Measured head-to-head comparison, with the mechanism behind each difference:
+> **[docs/LANDMARK_COMPARISON.md](docs/LANDMARK_COMPARISON.md)**.
 
 Syn2b's structural mathematics never depended on restriction digestion. Every metric
 in `synteny::scoring` consumes only a list of `(canonical identity, position, contig,
