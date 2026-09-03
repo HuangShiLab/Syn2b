@@ -7,9 +7,11 @@ Syn2b represents each genome as an ordered series of sparse anchor tags (the
 **Tag–Gap–Tag / TGT** model) and infers synteny from how the *order and
 adjacency* of those tags are conserved across genomes.
 
-> **Status: functional prototype.** The core pipeline (digest → TGT → graph →
-> synteny/scaffold) is implemented and tested. Performance optimization is the
-> next priority. See [Project status & roadmap](#project-status--roadmap).
+> **Status: active research tool.** The core pipeline (digest → TGT → graph →
+> synteny/scaffold) is implemented, unit-tested, and benchmarked. The engine now
+> supports both 2bRAD enzyme landmarks and FracMinHash landmarks, and has been
+> validated on synthetic rearrangements, GTDB-scale pairs, and published isolate
+> cohorts. See [Project status & roadmap](#project-status--roadmap).
 
 ---
 
@@ -559,22 +561,45 @@ graph.
 - **Scaffold subcommand**: draft-to-reference contig mapping with orientation
   detection and AGP v2.1 output.
 - DNA utilities (`reverse_complement`, `is_valid_dna`, `gc_content`).
-- Integration tests: 17 tests covering enzyme catalog, TGT round-trip, binary
-  I/O, digestion, graph creation, FASTA parsing, and CLI help.
+- **Pluggable landmark sources**: 2bRAD enzyme digestion or FracMinHash
+  sketches (`--mode fracminhash`), producing the same TGT downstream.
+- **Structural-synteny metrics**: `breakpoint_count`, `inverted_fraction`
+  (majority-frame and fixed-reference), `observable_fraction`, and junction
+  coordinates.
+- Integration tests: 18 tests covering enzyme catalog, TGT round-trip, binary
+  I/O, digestion, graph creation, FASTA parsing, CLI help, and FracMinHash
+  round-trip.
+
+**Completed milestones**
+
+1. **Performance optimization.** Digestion now uses `memchr` skip-based search
+   and per-enzyme `rayon` parallelism; the four-enzyme panel is substantially
+   faster than the byte-by-byte implementation.
+2. **Detection-power characterization.** Measured L50 resolution on *E. coli*
+   K-12: ~2.6 kb for inversions (BcgI) and ~1.2 kb for the four-enzyme panel;
+   translocations require roughly half the length. See
+   `docs/PHASE2_DETECTION_POWER.md`.
+3. **Mathematical analysis of fragmentation.** `breakpoint_count` now requires
+   positive contradiction, making it invariant to contig count; the residual
+   information loss is captured by `observable_fraction`. See
+   `docs/MATH_REVIEW.md`.
+4. **GTDB-scale validation.** Inverted fraction agrees with dnadiff at r = 0.936
+   across 43,334 held-out pairs (r = 0.996 for ≥97% ANIm), with a closed-form
+   standard-error model. See `docs/MATH_REVIEW.md` §7.
+5. **SynTracker cohort replication.** Four published isolate collections (E. coli
+   hypermutator, H. pylori, N. gonorrhoeae, S. rimosus) reproduced the expected
+   SNP-vs-SV evolutionary signatures.
 
 **Current priorities**
 
-1. **Performance optimization.** The current `digest_genome_contig()` uses
-   O(N × L × P) byte-by-byte scanning. Fast2bRAD-M achieves ~15× speedup via
-   regex `find_at` + rewind for degenerate enzymes. Target: skip-based search
-   (`memchr` for anchor first bytes), parallel per-enzyme digestion with
-   `rayon`, and batch processing with reusable buffers.
-2. **Scale testing.** Validate on larger datasets (GTDB-scale: 732K genomes
-   ≈ 3.7 Tbp). Current naive estimate: ~2–4 months; target with optimization:
-   ~1–2 weeks on a workstation.
-3. **Benchmark against SynTracker APSS.** Implement the full APSS pipeline
-   (BLAST + 5 kb window + bin-wise similarity) for direct comparison, or
-   establish that tag-order correlation is a valid proxy.
+1. **Closed-genome phenotype cohorts.** Select near-closed genomes from GTDB for
+   species with known large-inversion biology (*S. pneumoniae*, *S. enterica*,
+   *B. pertussis*, *P. aeruginosa*) and validate junction coordinates against
+   dnadiff.
+2. **FracMinHash design-rule experiments.** Test whether the error-model
+   constants transfer across landmark sources, or are panel-specific.
+3. **Syn2bANI integration.** Keep the Syn2b synteny engine aligned with the
+   Syn2bANI pairwise `struct` wrapper and shared TGT format.
 
 ---
 
@@ -597,6 +622,13 @@ sobering, important result:
 - On these genomes SynTracker's own APSS is ~98% explained by sequence
   divergence, i.e. synteny was not an independent strain-discriminating axis for
   this species.
+
+A subsequent four-species replication on published isolate cohorts (Enav et al.
+2024) produced the expected evolutionary signatures: *E. coli* hypermutator
+(SNP-driven, anchor adjacency flat despite wide ANI range), *S. rimosus*
+(clonal ANI but highly variable anchor adjacency, SV-driven), *N. gonorrhoeae*
+and *H. pylori* (mixed SNP + SV modes). These results are held in the
+Syn2bANI-paper repository under `results/syntracker_validation/`.
 
 **Practical limitations** of the tag-order approach:
 
@@ -626,7 +658,7 @@ See the top-level repository for the full analyses:
 
 ```bash
 cd syn2b
-cargo test            # unit + integration tests (78 passed, 0 failed)
+cargo test            # unit + integration tests (22 passed, 0 failed)
 cargo test --release  # optimized tests
 cargo build --release # release build (0 errors, 0 warnings)
 ```
