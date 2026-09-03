@@ -610,6 +610,14 @@ graph.
 5. **SynTracker cohort replication.** Four published isolate collections (E. coli
    hypermutator, H. pylori, N. gonorrhoeae, S. rimosus) reproduced the expected
    SNP-vs-SV evolutionary signatures.
+6. **Syn2bANI application benchmarks.** The same synteny engine underpins
+   Syn2bANI, which adds an MLE ANI estimator and a pairwise `struct` wrapper.
+   Application case studies in the Syn2bANI-paper repository demonstrate
+   phenotype-relevant architecture differences that ANI alone misses:
+   *H. pylori* cagPAI rearrangement states across Correa's cascade,
+   *B. longum* abfA gene-cluster deletion in a constipation-treatment cohort,
+   *E. coli* O157:H7 host-source differentiation, and FDA-ARGOS *S. aureus*
+   lineage structure. See https://github.com/HuangShiLab/Syn2bANI-paper.
 
 **Current priorities**
 
@@ -620,7 +628,9 @@ graph.
 2. **FracMinHash design-rule experiments.** Test whether the error-model
    constants transfer across landmark sources, or are panel-specific.
 3. **Syn2bANI integration.** Keep the Syn2b synteny engine aligned with the
-   Syn2bANI pairwise `struct` wrapper and shared TGT format.
+   Syn2bANI pairwise `struct` wrapper and shared TGT format; maintain
+   cross-references between `docs/MATH_REVIEW.md` / `docs/PHASE2_DETECTION_POWER.md`
+   and the Syn2bANI manuscript.
 
 ---
 
