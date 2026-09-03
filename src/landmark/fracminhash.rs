@@ -40,15 +40,26 @@
 //!
 //! | property | BcgI | 4-enzyme panel | FracMinHash |
 //! |---|---|---|---|
-//! | multi-copy tags | 2.15% | 3.20% | 1.70% (k=31) |
-//! | Hamming-1 near-duplicates | 28 (0.954%) | 116 (1.866%) | **0 (0.000%)** |
+//! | landmarks | 2,872 | 6,079 | 6,034 (k=31, s=750) |
+//! | multi-copy instances | 2.19% | 3.13% | 2.55% |
+//! | multi-copy families | 13 | 38 | 39 |
+//! | **unique landmarks 1 substitution from a family** | **7 (0.249%)** | **20 (0.340%)** | **0 (0.000%)** |
 //! | cross-species leakage to B. subtilis | 0.000% | — | 0.000% |
 //!
-//! The near-duplicate column is the operationally important one. Paralog
-//! convergence — two near-identical restriction sites collapsing onto each other
-//! under substitution — is the mechanism behind the `sub_2` residual that the
-//! >=2-landmark relocation rule exists to reject (see `docs/MATH_REVIEW.md`). With
-//! no Hamming-1 pairs to begin with, that failure mode has nothing to fire on.
+//! The last row is the operationally important one, and note that it is *not* about
+//! repeat content: FracMinHash carries just as many genuine multi-copy families,
+//! because repeats are a property of the genome rather than of the selection rule.
+//! The difference is that none of its unique landmarks sits one substitution away
+//! from one.
+//!
+//! That is the `sub_2` mechanism (see `docs/MATH_REVIEW.md`). A multi-copy family is
+//! dropped by the per-genome uniqueness filter; in a diverged genome, once enough of
+//! its copies are destroyed the survivor becomes unique and collides with a locus
+//! elsewhere, so the metric reads a landmark that teleported. Enzyme landmarks must
+//! contain a recognition motif, so they occupy a far smaller region of sequence
+//! space and near-collisions are correspondingly likelier. FracMinHash k-mers are
+//! drawn from the whole space with no shared constraint, and the >=2-landmark
+//! relocation rule that exists to reject this has nothing to reject here.
 
 use crate::enzyme::enzyme::EnzymeType;
 use crate::tgt::tag::{Strand, Tag};

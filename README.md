@@ -23,6 +23,7 @@ adjacency* of those tags are conserved across genomes.
 - [Repository layout](#repository-layout)
 - [The TGT format](#the-tgt-format)
 - [Landmark sources — 2bRAD or FracMinHash](#landmark-sources--2brad-or-fracminhash)
+  - [Full comparison: `docs/LANDMARK_COMPARISON.md`](docs/LANDMARK_COMPARISON.md)
 - [Type IIB restriction enzymes](#type-iib-restriction-enzymes)
 - [Building](#building)
 - [Command-line usage](#command-line-usage)
@@ -209,6 +210,9 @@ cross-checked against gaps recomputed from tag positions.
 
 ## Landmark sources — 2bRAD or FracMinHash
 
+> Measured head-to-head comparison, with the mechanism behind each difference:
+> **[docs/LANDMARK_COMPARISON.md](docs/LANDMARK_COMPARISON.md)**.
+
 Syn2b's structural mathematics never depended on restriction digestion. Every metric
 in `synteny::scoring` consumes only a list of `(canonical identity, position, contig,
 orientation)`, so any rule that picks reproducible loci can drive it. Two are
@@ -269,10 +273,27 @@ Substitution ladder, no rearrangement, so every junction is false:
 `breakpoints` is 0 for both, because the >=2-landmark relocation rule
 (`docs/MATH_REVIEW.md`) rejects the paralog-convergence artifact. But `scj_distance`
 is the *unfiltered* symmetric difference, and there the enzyme path still carries 6
-and 18 while FracMinHash carries none. The reason is measured: *E. coli* K-12 has 28
-Hamming-1 near-duplicate pairs under BcgI (0.954%) and 116 under the four-enzyme
-panel (1.866%), against **0 (0.000%)** for FracMinHash at every density and *k*
-tested. Paralog convergence needs near-duplicates to converge; the sketch has none.
+and 18 while FracMinHash carries none. The mechanism needs a unique landmark sitting one substitution away from a
+**multi-copy family**: the family is dropped by the per-genome uniqueness filter,
+but in a diverged genome, once enough of its copies are destroyed the survivor
+becomes unique and collides with the other locus. Measured on E. coli K-12, counting
+unique landmarks within one substitution of a multi-copy family in either
+orientation:
+
+| source | unique landmarks | multi-copy families | at risk | share |
+|---|---|---|---|---|
+| BcgI | 2,809 | 13 | 7 | 0.249% |
+| four-enzyme panel | 5,889 | 38 | 20 | 0.340% |
+| FracMinHash k=31 s=1582 | 2,776 | 17 | **0** | **0.000%** |
+| FracMinHash k=31 s=750 | 5,880 | 39 | **0** | **0.000%** |
+
+FracMinHash carries just as many genuine multi-copy families — repeats are a property
+of the genome, not of the selection rule — but none of its unique landmarks sits one
+substitution from one. Enzyme landmarks must contain a recognition motif, so they are
+crammed into a far smaller region of sequence space and near-collisions are
+correspondingly likelier; FracMinHash k-mers are drawn from the whole space with no
+shared constraint.
+
 So the relocation rule exists to protect the enzyme path from a failure mode the
 sketch path does not have.
 
