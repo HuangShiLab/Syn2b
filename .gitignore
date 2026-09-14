@@ -3,3 +3,6 @@
 *.swo
 *~
 .DS_Store
+# the paper repository is checked out inside this one on the authors machines
+/Syn2b-paper/
+/data/*.fasta

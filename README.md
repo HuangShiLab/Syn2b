@@ -458,52 +458,15 @@ let blocks = extract_synteny_blocks(&g);
 `sequence_str()` and `hamming_distance()`. Utilities in `bsyn::utils` include
 `reverse_complement`, `is_valid_dna`, and `gc_content`.
 
-The crate exposes its functionality as the `bsyn` library. Representative API:
-
-```rust
-use bsyn::enzyme::EnzymeType;
-use bsyn::enzyme::enzyme::Enzyme;
-use bsyn::enzyme::digest::digest_genome_contig;
-use bsyn::tgt::{Tag, TgtRecord, TgtReader, TgtWriter, Strand};
-use bsyn::synteny::{TagAdjacencyGraph, extract_synteny_blocks, synteny_score};
-use std::path::Path;
-
-// 1. Enzyme properties
-let bcgi = Enzyme::properties(EnzymeType::BcgI);
-assert_eq!(bcgi.tag_length, 32);
-assert_eq!(EnzymeType::all().len(), 16);
-
-// 2. In silico digestion → tags (multi-contig aware)
-let tags = digest_genome_contig(b"CGA......TGC...", EnzymeType::BcgI, 1, 0);
-
-// 3. Assemble a TGT record (gaps auto-computed from positions)
-let mut rec = TgtRecord::new("genome_a", 4_641_652);
-for t in tags { rec.add_tag(t); }
-rec.contig_names = vec!["NC_000913".to_string()];
-rec.contig_offsets = vec![0];
-println!("tags={}, mean_gap={:.1}", rec.tag_count(), rec.mean_gap());
-
-// 4. Persist / load (text or binary)
-TgtWriter::new(Path::new("genome_a.tgt"))?.write_record(&rec)?;
-let mut reader = TgtReader::new(Path::new("genome_a.tgt"))?;
-while let Some(r) = reader.read_record()? { /* ... */ }
-
-// 5. Build the adjacency graph across genomes and extract synteny
-let mut g = TagAdjacencyGraph::new();
-g.add_genome("genome_a", &rec);
-g.add_genome("genome_b", &rec_b);
-g.build_edges();
-g.simplify(2);                       // keep adjacencies supported by ≥2 genomes
-for path in g.linear_paths() {
-    println!("backbone score = {:.3}", synteny_score(&path, &g));
-}
-let blocks = extract_synteny_blocks(&g);
-```
-
-`TgtRecord` also offers `median_gap()`, `max_gap()`, and `coverage_fraction()`
-(estimated fraction of the genome covered by tag bases). `Tag` provides
-`sequence_str()` and `hamming_distance()`. Utilities in `bsyn::utils` include
-`reverse_complement`, `is_valid_dna`, and `gc_content`.
+The structural metrics reported by the `synteny` subcommand come from
+`bsyn::synteny::scoring::structural_synteny(&rec_a, &rec_b)`, which returns
+`breakpoints`, `scj_distance`, `inverted_fraction`, `raw_inverted_fraction`,
+`observable_fraction` and the junction coordinates. Note that
+`inverted_fraction` and `raw_inverted_fraction` are **landmark fractions** —
+the number of shared, orientation-informative landmarks whose strand differs,
+divided by the number of such landmarks — not base-pair-weighted fractions.
+The two coincide only when landmarks are evenly spaced; the difference is what
+the ~1.5 overdispersion coefficient in `docs/MATH_REVIEW.md` §7 absorbs.
 
 ---
 
@@ -587,9 +550,9 @@ graph.
 - **Structural-synteny metrics**: `breakpoint_count`, `inverted_fraction`
   (majority-frame and fixed-reference), `observable_fraction`, and junction
   coordinates.
-- Integration tests: 18 tests covering enzyme catalog, TGT round-trip, binary
-  I/O, digestion, graph creation, FASTA parsing, CLI help, and FracMinHash
-  round-trip.
+- Tests: 110 unit tests, 4 doc tests and 18 integration tests covering the
+  enzyme catalog, TGT round-trip, binary I/O, digestion, graph creation, FASTA
+  parsing, CLI help, FracMinHash round-trip and every structural metric.
 
 **Completed milestones**
 
@@ -679,9 +642,8 @@ inversions/translocations on a single complete genome at fixed divergence and
 show that tag-adjacency tracks the structural change while Mash does not. That is
 the recommended next experiment.
 
-See the top-level repository for the full analyses:
-`SYNTRACKER_vs_Syn2b_COMPLETE_REPORT.md`, `executive_summary.md`, and
-`syntracker_vs_syn2b_COMPLETE.png`.
+The full analyses live in the Syn2b-paper repository
+(https://github.com/HuangShiLab/Syn2b-paper, `results/metric_validation/`).
 
 ---
 
@@ -689,7 +651,7 @@ See the top-level repository for the full analyses:
 
 ```bash
 cd syn2b
-cargo test            # unit + integration tests (22 passed, 0 failed)
+cargo test            # unit + doc + integration tests (132 passed, 0 failed)
 cargo test --release  # optimized tests
 cargo build --release # release build (0 errors, 0 warnings)
 ```
@@ -704,7 +666,8 @@ round-trip and CLI validation.
 
 ## References
 
-- **SPEC:** [`../SPEC.md`](../SPEC.md) — full design specification for Syn2b.
+- **Design notes:** `docs/MATH_REVIEW.md` (fragmentation, error model),
+  `docs/PHASE2_DETECTION_POWER.md` (resolution), `docs/LANDMARK_COMPARISON.md`.
 - **ntSynt** — minimizer-graph synteny detection (inspiration for the tag
   adjacency graph).
 - **KmerAperture** (2024) — ordered k-mer series for structural variation.
