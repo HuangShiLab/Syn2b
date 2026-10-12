@@ -240,4 +240,7 @@ ensemble, so it must not be reported as exact-family retrieval.
 The GTDB/HROM HPC benchmark pipeline has been installed and launched. GTDB has
 143,586 references/1,000 selected queries; HROM uses all 142,277 TGT references
 and 500 selected queries. GTDB digest array `4257501` and HROM fragmentation
-job `4257552` were submitted on HPC. Final full-matrix results are pending.
+job `4257718` were submitted on HPC; GTDB search `4257792` is chained with
+`afterok:4257501`. Final full-matrix results are pending. Foldseek is installed
+on HPC, but FASTA-only structural search is invalid; structure generation or
+PDB/AlphaFold mapping is still required before Phase 5.

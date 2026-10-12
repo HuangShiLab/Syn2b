@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from pathlib import Path
 
@@ -84,14 +85,21 @@ def fragment_fastas(paths: list[Path], sizes: list[int], destination: Path) -> l
 
 
 def digest_queries(jobs: list[dict], syn2b: Path, destination: Path, mode: str,
-                   enzymes: str) -> Path:
+                   enzymes: str, threads: int) -> Path:
     query_tgt = destination / "fragments.tgt"
+
+    def digest_one(job: dict) -> bytes:
+        fragment_tgt = destination / f"{job['query_id']}.tgt"
+        run([syn2b, "digest", "--input", job["fasta"], "--output", fragment_tgt,
+             "--format", "text", "--mode", mode, "--enzymes", enzymes], capture=True)
+        data = fragment_tgt.read_bytes()
+        fragment_tgt.unlink()
+        return data
+
     with query_tgt.open("wb") as combined:
-        for job in jobs:
-            fragment_tgt = destination / f"{job['query_id']}.tgt"
-            run([syn2b, "digest", "--input", job["fasta"], "--output", fragment_tgt,
-                 "--format", "text", "--mode", mode, "--enzymes", enzymes], capture=True)
-            combined.write(fragment_tgt.read_bytes())
+        with ThreadPoolExecutor(max_workers=max(1, threads)) as executor:
+            for data in executor.map(digest_one, jobs):
+                combined.write(data)
     return query_tgt
 
 
@@ -205,6 +213,7 @@ def main() -> int:
     ap.add_argument("--min-tags", type=int, default=5)
     ap.add_argument("--min-adjacencies", type=int, default=3)
     ap.add_argument("--max-targets", type=int, default=25)
+    ap.add_argument("--threads", type=int, default=min(16, os.cpu_count() or 1))
     args = ap.parse_args()
 
     syn2b = Path(args.syn2b).resolve()
@@ -228,7 +237,9 @@ def main() -> int:
             raise RuntimeError("no fragments met the minimum 100 bp length")
 
         reference_tgt = build_reference(args, work)
-        query_tgt = digest_queries(jobs, syn2b, fragments, args.mode, args.enzymes)
+        query_tgt = digest_queries(
+            jobs, syn2b, fragments, args.mode, args.enzymes, args.threads
+        )
         index = work / "reference.s2cidx"
         metadata = Path(args.metadata) if args.metadata else None
         index_cmd = [syn2b, "contig-index", "--genome-tgt-dir", reference_tgt, "--output", index]

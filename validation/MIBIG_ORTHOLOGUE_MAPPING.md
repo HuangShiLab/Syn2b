@@ -108,3 +108,18 @@ requested jobs                 digest 29x4 cores/16 GB; search 16 cores/140-180 
 
 These totals fit comfortably within the group's remaining ~5.35-TB quota and
 the 166-TB Lustre filesystem free space.
+
+The local MoneyCat workstation has 305 GB free and 128 GB RAM. It completed
+the MIBiG best-hit reduction with ~0.90-GB peak RSS. It should not duplicate
+the full GTDB/HROM HPC databases: doing both would require roughly 130-220 GB
+of new storage, leaving inadequate headroom for temporary benchmark fragments.
+
+## Phase 5 structural-search status
+
+Foldseek 7f4b946 is installed at
+`/lustre1/g/aos_shihuang/tools/foldseek/bin/foldseek`. The first MIBiG
+hold-out test confirmed that amino-acid FASTA is not a valid Foldseek query:
+Foldseek requires PDB/mmCIF or precomputed 3Di structure databases. Therefore
+Phase 5 still requires either ESMFold/AlphaFold structures for selected
+proteins or a mapped PDB/AlphaFold structure proxy pipeline. No structural
+correlation result is claimed.
