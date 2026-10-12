@@ -1,0 +1,244 @@
+#![allow(
+    clippy::single_match,
+    clippy::if_same_then_else,
+    clippy::implicit_saturating_sub
+)]
+
+//! Backward-compatible single-reference scaffold placement.
+//!
+//! This is the original `syn2b scaffold` implementation moved unchanged into
+//! the search module. New `search-contig`/`place-contig` uses canonical tags and
+//! adjacency postings instead; this command remains a stable compatibility API.
+
+use crate::tgt::{Strand, Tag, TgtReader, TgtRecord};
+use anyhow::Result;
+use std::collections::HashMap;
+use std::path::Path;
+
+#[derive(Debug)]
+struct AnchoredContig {
+    #[allow(dead_code)]
+    contig_id: u16,
+    contig_name: String,
+    median_ref: u64,
+    is_reverse: bool,
+    length: u64,
+}
+
+struct OrientationResult {
+    count: usize,
+    positions: Vec<(u64, u64, Strand)>,
+}
+
+/// Run the legacy scaffold command.
+pub fn run_scaffold(
+    ref_path: &Path,
+    draft_path: &Path,
+    out_path: &Path,
+    min_tags: usize,
+) -> Result<()> {
+    use std::io::Write;
+
+    let ref_r = load_single_tgt(ref_path)?;
+    let draft_r = load_single_tgt(draft_path)?;
+    println!(
+        "Ref: {} tags, {} contig(s)",
+        ref_r.tags.len(),
+        ref_r.contig_names.len().max(1)
+    );
+    println!(
+        "Draft: {} tags, {} contig(s)",
+        draft_r.tags.len(),
+        draft_r.contig_names.len().max(1)
+    );
+
+    let mut ref_map: HashMap<[u8; 32], Vec<(u64, u16, Strand)>> = HashMap::new();
+    for t in &ref_r.tags {
+        ref_map
+            .entry(t.sequence)
+            .or_default()
+            .push((t.position, t.contig_id, t.strand));
+    }
+
+    let mut draft_contigs: HashMap<u16, Vec<&Tag>> = HashMap::new();
+    for t in &draft_r.tags {
+        draft_contigs.entry(t.contig_id).or_default().push(t);
+    }
+
+    let mut contig_lengths: HashMap<u16, u64> = HashMap::new();
+    for i in 0..draft_r.contig_offsets.len() {
+        let cid = (i + 1) as u16;
+        let start = draft_r.contig_offsets[i];
+        let end = if i + 1 < draft_r.contig_offsets.len() {
+            draft_r.contig_offsets[i + 1]
+        } else {
+            draft_r.total_length
+        };
+        contig_lengths.insert(cid, end - start);
+    }
+    if draft_r.contig_offsets.is_empty() {
+        contig_lengths.insert(0, draft_r.total_length);
+    }
+
+    let mut anchored: Vec<AnchoredContig> = Vec::new();
+    for (cid, tags) in &draft_contigs {
+        let name = if *cid == 0 {
+            if draft_r.contig_names.is_empty() {
+                "contig_0".to_string()
+            } else {
+                draft_r.genome_id.clone()
+            }
+        } else {
+            draft_r
+                .contig_names
+                .get((*cid - 1) as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("contig_{}", cid))
+        };
+
+        let fwd = evaluate_orientation(tags, &ref_map, false);
+        let rev = evaluate_orientation(tags, &ref_map, true);
+        match (&fwd, &rev) {
+            (Some(a), Some(b)) => {
+                println!("DBG {}: fwd={} rev={}", name, a.count, b.count);
+            }
+            _ => (),
+        };
+
+        let (is_rev, _shared, tc) = match (fwd, rev) {
+            (Some(f), Some(r)) => {
+                let ratio = if f.count > 0 {
+                    r.count as f64 / f.count as f64
+                } else {
+                    f64::INFINITY
+                };
+                if ratio > 2.0 {
+                    (true, r.positions, r.count)
+                } else if ratio < 0.5 {
+                    (false, f.positions, f.count)
+                } else {
+                    (false, f.positions, f.count)
+                }
+            }
+            (Some(f), None) => (false, f.positions, f.count),
+            (None, Some(r)) => (true, r.positions, r.count),
+            (None, None) => continue,
+        };
+        if tc < min_tags {
+            continue;
+        }
+        let mut rp: Vec<u64> = _shared.iter().map(|&(p, _, _)| p).collect();
+        rp.sort();
+        let med = rp[rp.len() / 2];
+        let length = contig_lengths.get(cid).copied().unwrap_or(1000);
+        anchored.push(AnchoredContig {
+            contig_id: *cid,
+            contig_name: name,
+            median_ref: med,
+            is_reverse: is_rev,
+            length,
+        });
+    }
+
+    anchored.sort_by_key(|a| a.median_ref);
+    println!("Anchored {} contig(s)", anchored.len());
+
+    let mut f = std::fs::File::create(out_path)?;
+    writeln!(f, "## AGP version 2.1")?;
+    writeln!(
+        f,
+        "# Ref: {}  Draft: {}",
+        ref_r.genome_id, draft_r.genome_id
+    )?;
+    let mut st = 1u64;
+    let mut pn = 1usize;
+    for (i, c) in anchored.iter().enumerate() {
+        let strand = if c.is_reverse { "-" } else { "+" };
+        let obj_end = st + c.length - 1;
+        writeln!(
+            f,
+            "scaffold_1\t{}\t{}\t{}\tW\t{}\t1\t{}\t{}",
+            st, obj_end, pn, c.contig_name, c.length, strand
+        )?;
+        st = obj_end + 1;
+        pn += 1;
+        if i + 1 < anchored.len() {
+            let ref_gap = if anchored[i + 1].median_ref > c.median_ref {
+                anchored[i + 1].median_ref - c.median_ref
+            } else {
+                0
+            };
+            let next_len = anchored[i + 1].length;
+            let gap_size = if ref_gap > c.length + next_len {
+                ref_gap - c.length / 2 - next_len / 2
+            } else {
+                10
+            };
+            let gap_end = st + gap_size - 1;
+            writeln!(
+                f,
+                "scaffold_1\t{}\t{}\t{}\tN\t{}\tscaffold\tyes\tpair",
+                st, gap_end, pn, gap_size
+            )?;
+            st = gap_end + 1;
+            pn += 1;
+        }
+    }
+    println!("Scaffold written to {:?}", out_path);
+    Ok(())
+}
+
+fn evaluate_orientation(
+    tags: &[&Tag],
+    ref_map: &HashMap<[u8; 32], Vec<(u64, u16, Strand)>>,
+    is_rev: bool,
+) -> Option<OrientationResult> {
+    let mut sp: Vec<(u64, u64, Strand)> = Vec::new();
+    for t in tags {
+        let lookup = if is_rev {
+            reverse_complement_32(&t.sequence)
+        } else {
+            t.sequence
+        };
+        if let Some(e) = ref_map.get(&lookup) {
+            for &(rp, _, rs) in e {
+                sp.push((rp, t.position, rs));
+            }
+        }
+    }
+    if sp.is_empty() {
+        return None;
+    }
+    sp.sort_by_key(|&(_, dp, _)| dp);
+    Some(OrientationResult {
+        count: sp.len(),
+        positions: sp,
+    })
+}
+
+fn reverse_complement_32(s: &[u8; 32]) -> [u8; 32] {
+    let mut r = [0u8; 32];
+    for i in 0..32 {
+        r[i] = comp_base(s[31 - i]);
+    }
+    r
+}
+
+fn comp_base(b: u8) -> u8 {
+    match b {
+        b'A' | b'a' => b'T',
+        b'T' | b't' => b'A',
+        b'C' | b'c' => b'G',
+        b'G' | b'g' => b'C',
+        _ => b'N',
+    }
+}
+
+fn load_single_tgt(p: &Path) -> Result<TgtRecord> {
+    let mut r = TgtReader::new(p)?;
+    if let Some(rec) = r.read_record()? {
+        Ok(rec)
+    } else {
+        anyhow::bail!("No TGT in {:?}", p)
+    }
+}

@@ -8,9 +8,11 @@
 // The crate is intentionally named `Syn2b` (not snake_case); silence the lint.
 #![allow(non_snake_case)]
 
+pub mod cluster;
 pub mod enzyme;
 pub mod io;
 pub mod landmark;
+pub mod search;
 pub mod synteny;
 pub mod tgt;
 pub mod utils;

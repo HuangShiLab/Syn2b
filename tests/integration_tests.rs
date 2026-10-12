@@ -126,10 +126,34 @@ fn test_gap_statistics() {
     let mut record = TgtRecord::new("test", 100000);
 
     // Add tags with known gaps: 1000, 2000, 3000
-    record.add_tag(Tag::new([b'A'; 32], 0, EnzymeType::BcgI, Strand::Forward, 0));
-    record.add_tag(Tag::new([b'C'; 32], 1000, EnzymeType::BcgI, Strand::Forward, 0));
-    record.add_tag(Tag::new([b'G'; 32], 3000, EnzymeType::BcgI, Strand::Forward, 0));
-    record.add_tag(Tag::new([b'T'; 32], 6000, EnzymeType::BcgI, Strand::Forward, 0));
+    record.add_tag(Tag::new(
+        [b'A'; 32],
+        0,
+        EnzymeType::BcgI,
+        Strand::Forward,
+        0,
+    ));
+    record.add_tag(Tag::new(
+        [b'C'; 32],
+        1000,
+        EnzymeType::BcgI,
+        Strand::Forward,
+        0,
+    ));
+    record.add_tag(Tag::new(
+        [b'G'; 32],
+        3000,
+        EnzymeType::BcgI,
+        Strand::Forward,
+        0,
+    ));
+    record.add_tag(Tag::new(
+        [b'T'; 32],
+        6000,
+        EnzymeType::BcgI,
+        Strand::Forward,
+        0,
+    ));
 
     assert_eq!(record.mean_gap(), 2000.0); // (1000 + 2000 + 3000) / 3
     assert_eq!(record.max_gap(), 3000);
@@ -207,14 +231,15 @@ fn test_cli_help() {
 
     // Help output might be in stdout or stderr depending on how clap outputs
     let combined = format!("{}{}", stdout, stderr);
-    
+
     assert!(
-        combined.contains("2bRAD-based Synteny Detection Engine") || 
-        combined.contains("Commands:") ||
-        combined.contains("digest") ||
-        combined.contains("synteny"),
+        combined.contains("2bRAD-based Synteny Detection Engine")
+            || combined.contains("Commands:")
+            || combined.contains("digest")
+            || combined.contains("synteny"),
         "CLI help should contain expected content. Got stdout: {}, stderr: {}",
-        stdout, stderr
+        stdout,
+        stderr
     );
 }
 
@@ -231,9 +256,27 @@ fn test_binary_roundtrip() {
 
     // Create a test record with contig names
     let mut record = TgtRecord::new("test_genome", 10000);
-    record.add_tag(Tag::new([b'A'; 32], 100, EnzymeType::BcgI, Strand::Forward, 0));
-    record.add_tag(Tag::new([b'C'; 32], 1500, EnzymeType::AlfI, Strand::Reverse, 0));
-    record.add_tag(Tag::new([b'G'; 32], 3000, EnzymeType::BaeI, Strand::Forward, 0));
+    record.add_tag(Tag::new(
+        [b'A'; 32],
+        100,
+        EnzymeType::BcgI,
+        Strand::Forward,
+        0,
+    ));
+    record.add_tag(Tag::new(
+        [b'C'; 32],
+        1500,
+        EnzymeType::AlfI,
+        Strand::Reverse,
+        0,
+    ));
+    record.add_tag(Tag::new(
+        [b'G'; 32],
+        3000,
+        EnzymeType::BaeI,
+        Strand::Forward,
+        0,
+    ));
     record.contig_names = vec!["NC_000913".to_string(), "plasmid_p".to_string()];
 
     // Write binary
@@ -382,11 +425,271 @@ fn fracminhash_tgt_survives_both_formats_and_still_scores() {
             scored.breakpoints, direct.breakpoints,
             "{label}: round-tripped record must score identically"
         );
-        assert_eq!(scored.shared_tags, direct.shared_tags, "{label}: shared tags");
+        assert_eq!(
+            scored.shared_tags, direct.shared_tags,
+            "{label}: shared tags"
+        );
         assert_eq!(
             scored.scj_distance, direct.scj_distance,
             "{label}: scj_distance"
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Syn2b-Contig v1
+// ---------------------------------------------------------------------------
+
+fn contig_test_sequence(index: usize) -> [u8; 32] {
+    let bases = [b'A', b'C', b'G', b'T'];
+    let mut sequence = [0u8; 32];
+    for (position, base) in bases.iter().enumerate() {
+        sequence[position] = *base;
+    }
+    // A valid two-base prefix gives 16 distinguishable DNA landmarks while the
+    // rest keeps the TGT parser's DNA validation happy.
+    sequence[0] = bases[(index / 4) % 4];
+    sequence[1] = bases[index % 4];
+    sequence[2] = b'T';
+    sequence
+}
+
+fn write_search_tgt(path: &std::path::Path, id: &str, tags: &[bsyn::tgt::Tag]) {
+    let mut record = bsyn::tgt::TgtRecord::new(id, 10_000);
+    for tag in tags {
+        record.add_tag(tag.clone());
+    }
+    record.contig_names.push("ctg".to_string());
+    let mut writer = bsyn::tgt::TgtWriter::new(path).unwrap();
+    writer.write_record(&record).unwrap();
+}
+
+fn positional_tag(sequence: [u8; 32], position: u64) -> bsyn::tgt::Tag {
+    bsyn::tgt::Tag::new(
+        sequence,
+        position,
+        bsyn::enzyme::EnzymeType::BcgI,
+        bsyn::tgt::Strand::Forward,
+        1,
+    )
+}
+
+#[test]
+fn contig_index_roundtrip_and_exact_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference_tags: Vec<_> = (0..6)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + index as u64 * 900))
+        .collect();
+    write_search_tgt(&dir.path().join("a.tgt"), "genome_a", &reference_tags);
+    write_search_tgt(
+        &dir.path().join("b.tgt"),
+        "genome_b",
+        &[positional_tag(contig_test_sequence(15), 100)],
+    );
+    let metadata_path = dir.path().join("genomes.tsv");
+    std::fs::write(
+        &metadata_path,
+        "genome_id\tspecies_cluster\ttaxonomy\tfasta_path\tis_representative\ngenome_a\ttest_species\tBacteria\ta.fna\ttrue\n",
+    )
+    .unwrap();
+
+    let index_path = dir.path().join("reference.s2cidx");
+    let metadata = bsyn::search::read_genome_metadata(&metadata_path).unwrap();
+    let index = bsyn::search::build_index(dir.path(), Some(&metadata)).unwrap();
+    assert_eq!(index.genomes.len(), 2);
+    assert_eq!(index.sequences.len(), 7);
+    assert_eq!(index.tag_postings.len(), 7);
+    assert!(index
+        .tag_postings
+        .values()
+        .all(|postings| postings.len() == 1));
+    index.write(&index_path).unwrap();
+    let roundtrip = bsyn::search::ContigIndex::read(&index_path).unwrap();
+    assert_eq!(roundtrip, index);
+
+    let query_tags: Vec<_> = (0..5)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + index as u64 * 900))
+        .collect();
+    write_search_tgt(&dir.path().join("query.tgt"), "query", &query_tags);
+    let queries = bsyn::search::read_tgt_records(&dir.path().join("query.tgt")).unwrap();
+    let options = bsyn::search::SearchOptions {
+        min_tags: 3,
+        min_adjacencies: 2,
+        max_targets: 10,
+    };
+    let hits = bsyn::search::search_records(&queries, &roundtrip, options);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].best_genome, "genome_a");
+    assert_eq!(hits[0].best_species_cluster, "test_species");
+    assert_eq!(hits[0].shared_tags, 5);
+    assert_eq!(hits[0].shared_adjacencies, 4);
+    assert_eq!(hits[0].orientation, '+');
+
+    let placements = dir.path().join("placements.tsv");
+    let details = dir.path().join("details.tsv");
+    bsyn::search::write_placements(&placements, &hits).unwrap();
+    bsyn::search::write_placement_details(&details, &hits).unwrap();
+    let header = std::fs::read_to_string(placements).unwrap();
+    assert!(header.starts_with("query_id\tquery_length\tquery_tags\t"));
+    let details = std::fs::read_to_string(details).unwrap();
+    assert!(details.starts_with("query_id\tquery_block_id\tquery_start\t"));
+}
+
+#[test]
+fn contig_index_recovers_reverse_orientation() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference_tags: Vec<_> = (0..6)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + index as u64 * 900))
+        .collect();
+    write_search_tgt(&dir.path().join("a.tgt"), "genome_a", &reference_tags);
+    let index = bsyn::search::build_index(dir.path(), None).unwrap();
+
+    // Landmark identities remain in reference order, but query coordinates are
+    // the exact reverse, so the only valid ordered chain is reverse-oriented.
+    let query_tags: Vec<_> = (0..5)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + (4 - index) as u64 * 900))
+        .collect();
+    write_search_tgt(&dir.path().join("query.tgt"), "query", &query_tags);
+    let queries = bsyn::search::read_tgt_records(&dir.path().join("query.tgt")).unwrap();
+    let hits = bsyn::search::search_records(
+        &queries,
+        &index,
+        bsyn::search::SearchOptions {
+            min_tags: 3,
+            min_adjacencies: 2,
+            max_targets: 5,
+        },
+    );
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].best_genome, "genome_a");
+    assert_eq!(
+        hits[0].orientation, '-',
+        "shared={} adjacency={} block={:?}",
+        hits[0].shared_tags, hits[0].shared_adjacencies, hits[0].best_block
+    );
+}
+
+#[test]
+fn canonical_sequence_matches_true_reverse_complement() {
+    let mut forward = [0u8; 32];
+    forward[..8].copy_from_slice(b"AAAACCCC");
+    let mut reverse = [0u8; 32];
+    reverse[..8].copy_from_slice(b"GGGGTTTT");
+    assert_eq!(bsyn::search::canonical_sequence(&forward), forward);
+    assert_eq!(
+        bsyn::search::canonical_sequence(&reverse),
+        bsyn::search::canonical_sequence(&forward)
+    );
+}
+
+#[test]
+fn contig_index_reads_binary_tgt_references_and_queries() {
+    let dir = tempfile::tempdir().unwrap();
+    let reference_tags: Vec<_> = (0..6)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + index as u64 * 900))
+        .collect();
+    let mut reference = bsyn::tgt::TgtRecord::new("binary_ref", 10_000);
+    for tag in reference_tags {
+        reference.add_tag(tag);
+    }
+    reference.contig_names.push("ctg".to_string());
+    let reference_dir = dir.path().join("reference");
+    std::fs::create_dir(&reference_dir).unwrap();
+    let mut writer = bsyn::tgt::TgtWriter::new(&reference_dir.join("reference.tgt")).unwrap();
+    writer.write_binary(&reference).unwrap();
+
+    let query_tags: Vec<_> = (0..5)
+        .map(|index| positional_tag(contig_test_sequence(index), 100 + index as u64 * 900))
+        .collect();
+    let mut query = bsyn::tgt::TgtRecord::new("binary_query", 10_000);
+    for tag in query_tags {
+        query.add_tag(tag);
+    }
+    query.contig_names.push("ctg".to_string());
+    let mut writer = bsyn::tgt::TgtWriter::new(&dir.path().join("query.tgt")).unwrap();
+    writer.write_binary(&query).unwrap();
+
+    let index = bsyn::search::build_index(&reference_dir, None).unwrap();
+    let queries = bsyn::search::read_tgt_records(&dir.path().join("query.tgt")).unwrap();
+    let hits = bsyn::search::search_records(
+        &queries,
+        &index,
+        bsyn::search::SearchOptions {
+            min_tags: 3,
+            min_adjacencies: 2,
+            max_targets: 5,
+        },
+    );
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].best_genome, "binary_ref");
+    assert_eq!(hits[0].orientation, '+');
+}
+
+#[test]
+fn cluster_ingest_build_index_search_cli_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let features_path = dir.path().join("features.tsv");
+    std::fs::write(
+        &features_path,
+        concat!(
+            "gene_id\tgenome_id\tcontig_id\tstart\tend\tstrand\tproduct\tko\tpfam\tcog\teggnog\tsmash_tool\tcluster_id\n",
+            "t1\tgenome_a\tctg\t1\t10\t+\ttransporter\tK001\tPF00001\tCOG0001\tENOG0001\tT3SS\tbgc\n",
+            "t2\tgenome_a\tctg\t20\t30\t+\tscaffold\tK002\tPF00002\tCOG0002\tENOG0002\tT3SS\tbgc\n",
+            "t3\tgenome_a\tctg\t40\t50\t+\teffector\tK003\tPF00003\tCOG0003\tENOG0003\tT3SS\tbgc\n",
+        ),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_syn2b");
+    let normalized = dir.path().join("normalized.tsv");
+    run_success(&[
+        bin,
+        "cluster-ingest",
+        "--features",
+        features_path.to_str().unwrap(),
+        "--output",
+        normalized.to_str().unwrap(),
+    ]);
+    let s2cl = dir.path().join("genome.s2cl");
+    run_success(&[
+        bin,
+        "cluster-build",
+        "--features",
+        normalized.to_str().unwrap(),
+        "--output",
+        s2cl.to_str().unwrap(),
+    ]);
+    let s2cldb = dir.path().join("clusters.s2cldb");
+    run_success(&[
+        bin,
+        "cluster-index",
+        "--cluster-files",
+        s2cl.to_str().unwrap(),
+        "--output",
+        s2cldb.to_str().unwrap(),
+    ]);
+    let hits = dir.path().join("cluster_hits.tsv");
+    run_success(&[
+        bin,
+        "search-cluster",
+        "--query",
+        normalized.to_str().unwrap(),
+        "--index",
+        s2cldb.to_str().unwrap(),
+        "--output",
+        hits.to_str().unwrap(),
+    ]);
+    let report = std::fs::read_to_string(&hits).unwrap();
+    assert!(report.starts_with("query_cluster_id\ttarget_cluster_id\t"));
+    assert!(report.contains("genome_a:bgc"));
+    assert!(report.contains("1.000000"));
+}
+
+fn run_success(args: &[&str]) {
+    let status = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .status()
+        .expect("failed to launch syn2b");
+    assert!(status.success(), "command failed: {args:?}");
 }

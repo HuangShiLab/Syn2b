@@ -20,7 +20,7 @@ pub struct FastaRecord {
 ///
 /// Reads one record at a time without loading the entire file into memory.
 pub struct FastaReader {
-    reader: BufReader<File>,
+    reader: BufReader<Box<dyn BufRead + Send>>,
     peeked_line: Option<String>,
 }
 
@@ -29,8 +29,15 @@ impl FastaReader {
     pub fn new(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open FASTA file: {}", path.display()))?;
+        let inner: Box<dyn BufRead + Send> = if path.extension().and_then(|x| x.to_str())
+            == Some("gz")
+        {
+            Box::new(BufReader::new(flate2::read::MultiGzDecoder::new(file)))
+        } else {
+            Box::new(BufReader::new(file))
+        };
         Ok(Self {
-            reader: BufReader::new(file),
+            reader: BufReader::new(inner),
             peeked_line: None,
         })
     }

@@ -27,6 +27,7 @@ adjacency* of those tags are conserved across genomes.
 - [Type IIB restriction enzymes](#type-iib-restriction-enzymes)
 - [Building](#building)
 - [Command-line usage](#command-line-usage)
+- [Syn2b-Contig: reusable placement search](#syn2b-contig-reusable-placement-search)
 - [Library usage](#library-usage)
 - [Synteny algorithm](#synteny-algorithm)
 - [Scoring metrics](#scoring-metrics)
@@ -131,6 +132,12 @@ syn2b/
 │   │   └── digest.rs          # in silico digestion (pattern matching + tag extraction)
 │   ├── landmark/              # Landmark sources — what the structural metrics consume
 │   │   └── fracminhash.rs     # FracMinHash selection: h(canonical(kmer)) < u64::MAX / scale
+│   ├── search/                # Syn2b-Contig placement index/search/scaffold
+│   │   ├── index.rs           # .s2cidx v1 model and builder
+│   │   ├── query.rs           # candidates, scoring, placement TSVs
+│   │   ├── chaining.rs        # ordered forward/reverse chains
+│   │   ├── chimera.rs         # sliding-window transition scan
+│   │   └── scaffold.rs        # legacy scaffold compatibility implementation
 │   ├── synteny/               # Synteny-detection engine
 │   │   ├── graph.rs           # TagAdjacencyGraph, TagNode, AdjacencyEdge
 │   │   ├── scoring.rs         # synteny_score, pairwise matrix, Jaccard, Kendall τ, breakpoints
@@ -354,6 +361,10 @@ Commands:
   digest     In silico digest genomes with 2bRAD enzymes
   synteny    Compute synteny between genomes using TGT
   scaffold   Map draft contigs onto a reference using shared tags
+  contig-index Build reusable contig-placement index (.s2cidx v1)
+  search-contig Search query contigs against a contig index
+  place-contig Search and emit chained-block placement details
+  scan-chimera Sliding-window genome/cluster transition scan
   coverage   Analyze multi-enzyme coverage statistics
   convert    Convert between TGT text and binary formats
 ```
@@ -384,6 +395,22 @@ syn2b coverage -i genome.fasta --enzymes all
 syn2b convert -i genome.tgt -o genome.btgt --format binary
 ```
 
+# Build a reusable placement database from reference TGTs
+syn2b contig-index --genome-tgt-dir ref_tgt/ --output reference.s2cidx \
+  --genome-metadata genomes.tsv
+
+# Fast search (one row per query contig)
+syn2b search-contig --index reference.s2cidx --query query.tgt \
+  --output placements.tsv --hits hits.tsv
+
+# Detailed placement (also writes placements.hits.tsv)
+syn2b place-contig --index reference.s2cidx --query query.tgt \
+  --output placements.tsv --details placement_details.tsv
+
+# Chimera/window scan
+syn2b scan-chimera --index reference.s2cidx --query query.tgt \
+  --output chimerism.tsv --window 50kb --min-window-tags 10
+
 Common options: `-i/--input`, `-o/--output`, `-e/--enzymes`
 (comma-separated names or `all`), `-f/--format` (`text` | `binary`).
 
@@ -402,6 +429,102 @@ The `scaffold` command maps draft contigs onto a reference genome:
 This has been validated on E. coli K-12 self-scaffold (4 reversed contigs
 correctly identified) and ABHQ draft (135 contigs → 45 anchored at
 `min_tags=3`).
+
+---
+
+## Syn2b-Contig: reusable placement search
+
+The new `src/search/` layer extends the one-reference scaffold command into a
+versioned, reusable ordered-landmark index (`.s2cidx` v1). It stores genome and
+contig metadata, canonical landmark identities, tag postings, and canonical
+unordered adjacency postings. Search canonicalizes both strands, so inverted
+regions retain landmark matches while orientation is recovered by coordinate
+chaining.
+
+The current MVP:
+
+- accepts text or binary reference/query TGT files;
+- rejects mixed 2bRAD/FracMinHash databases;
+- emits stable TSV headers;
+- ranks candidates with shared unique landmarks, conserved adjacencies,
+  chained-block coverage, orientation consistency, uniqueness, and interior
+  support;
+- drops landmarks repeated on either query or target contig from chaining to
+  avoid repeat-induced false chains;
+- writes the complete ranked target list to a separate `hits.tsv` for top-k
+  evaluation;
+- retains the legacy `scaffold` CLI unchanged, now implemented by
+  `bsyn::search::scaffold`.
+
+Reference metadata is optional and uses the five documented columns:
+
+```text
+genome_id    species_cluster    taxonomy    fasta_path    is_representative
+```
+
+A benchmark harness fragments complete FASTA genomes, digests each fragment,
+searches an indexed database, and reports top-1/top-5, species-cluster,
+orientation, and coverage metrics:
+
+```bash
+scripts/benchmark_contig_fragmentation.py \
+  --reference-tgt-dir ref_tgt/ \
+  --query-fasta complete_genomes/*.fna \
+  --syn2b target/release/syn2b \
+  --output benchmark_contig_fragmentation.tsv
+
+scripts/benchmark_search_baselines.py \
+  --reference-fasta complete_genomes/*.fna \
+  --query-fasta heldout_genomes/*.fna \
+  --tools minimap2 skani \
+  --output-prefix benchmark_contig_baseline
+```
+
+Confidence labels are heuristic pending posterior calibration on simulated and
+real MAG fragments. Sub-10 kb queries remain exploratory.
+
+---
+
+## Syn2b-Cluster MVP
+
+Syn2b-Cluster consumes existing annotations rather than predicting genes or
+functions. It indexes functional tokens and ordered gene adjacency signatures.
+
+```bash
+# GFF3/GTF ingestion (KO/Pfam/product evidence must already be attributes)
+syn2b cluster-ingest --genome-id genome_a --gff genes.gff \
+  --output genome.gclusters.tsv
+
+# Or use the stable 13-column feature table directly
+syn2b cluster-build --features genome.gclusters.tsv \
+  --output genome.s2cl --max-gap 5000 --min-genes 3
+
+syn2b cluster-index --cluster-files genomes/*.s2cl \
+  --output clusters.s2cldb
+
+syn2b search-cluster --query query_features.tsv \
+  --index clusters.s2cldb --output cluster_hits.tsv \
+  --min-functional-jaccard 0.25 --min-synteny 0.10
+```
+
+Feature table columns:
+
+```text
+gene_id genome_id contig_id start end strand product
+ko pfam cog eggnog smash_tool cluster_id
+```
+
+The report contains unweighted and weighted functional similarity, adjacency
+score, projected-order score after gene loss, copy-number score, combined
+score, missing/extra tokens, inversion flag, and split-cluster flag.
+
+A controlled synthetic rearrangement benchmark (loss, duplication, inversion,
+truncation; 200 queries) recovers the source cluster at 100% top-1/top-5. A
+50-family synthetic hold-out recovers the correct family at 100% top-1/top-5.
+MIBiG 4.0, CARD, AMRFinderPlus 4.2, and ResFinder 2.6.0 have now been imported
+into the cluster schema; see `scripts/import_external_functional_sets.py` and
+`external_data/imported/import_stats.json`. Independent biological retrieval
+benchmarks still require OAPGC eggNOG/antiSMASH annotations.
 
 ---
 

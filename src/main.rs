@@ -1,15 +1,21 @@
 //! Syn2b — 2bRAD-based Synteny Detection Engine
 
-use clap::{Parser, Subcommand};
 use anyhow::Result;
-use std::path::PathBuf;
-use std::collections::HashMap;
 use bsyn::enzyme::EnzymeType;
-use bsyn::tgt::{Strand, Tag, TgtRecord};
+use bsyn::tgt::{Tag, TgtRecord};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "syn2b", about = "2bRAD-based Synteny Detection Engine", version)]
-struct Cli { #[command(subcommand)] command: Commands }
+#[command(
+    name = "syn2b",
+    about = "2bRAD-based Synteny Detection Engine",
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
 #[derive(Subcommand)]
 enum Commands {
@@ -19,139 +25,402 @@ enum Commands {
     /// `--mode fracminhash` selects k-mers by `h(canonical) < u64::MAX / scale`
     /// instead; `--enzymes` is then unused and `--kmer` / `--scale` apply.
     Digest {
-        #[arg(short,long)]input:PathBuf,
-        #[arg(short,long)]output:PathBuf,
-        #[arg(short,long,default_value="BcgI")]enzymes:String,
-        #[arg(short,long,default_value="text")]format:String,
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(short, long, default_value = "BcgI")]
+        enzymes: String,
+        #[arg(short, long, default_value = "text")]
+        format: String,
         /// Landmark source: `2brad` or `fracminhash` (aliases: `enzyme`, `fmh`).
-        #[arg(long,default_value="2brad")]mode:String,
+        #[arg(long, default_value = "2brad")]
+        mode: String,
         /// FracMinHash k-mer length, 1..=32. Ignored in 2brad mode.
-        #[arg(long,default_value_t=31)]kmer:usize,
+        #[arg(long, default_value_t = 31)]
+        kmer: usize,
         /// FracMinHash compression: one k-mer in `scale` is kept, so expected
         /// landmark spacing is `scale` bp. Ignored in 2brad mode.
-        #[arg(long,default_value_t=1000)]scale:u64,
+        #[arg(long, default_value_t = 1000)]
+        scale: u64,
     },
-    Synteny { #[arg(short,long)]input:PathBuf, #[arg(short,long)]output:PathBuf },
-    Coverage { #[arg(short,long)]input:PathBuf, #[arg(short,long,default_value="all")]enzymes:String },
-    Convert { #[arg(short,long)]input:PathBuf, #[arg(short,long)]output:PathBuf, #[arg(short,long,default_value="binary")]format:String },
-    Scaffold { #[arg(short,long)]reference:PathBuf, #[arg(short,long)]draft:PathBuf, #[arg(short,long)]output:PathBuf, #[arg(short,long,default_value="3")]min_tags:usize },
+    Synteny {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    Coverage {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long, default_value = "all")]
+        enzymes: String,
+    },
+    Convert {
+        #[arg(short, long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(short, long, default_value = "binary")]
+        format: String,
+    },
+    Scaffold {
+        #[arg(short, long)]
+        reference: PathBuf,
+        #[arg(short, long)]
+        draft: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(short, long, default_value = "3")]
+        min_tags: usize,
+    },
+    /// Build a reusable ordered-landmark contig-placement index (.s2cidx).
+    ContigIndex {
+        #[arg(long)]
+        genome_tgt_dir: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        genome_metadata: Option<PathBuf>,
+    },
+    /// Search query contigs against a contig-placement index.
+    SearchContig {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value = "5")]
+        min_tags: usize,
+        #[arg(long, default_value = "3")]
+        min_adjacencies: usize,
+        #[arg(long, default_value_t = 25)]
+        max_targets: usize,
+    },
+    /// Search query contigs and write chained-block placement details.
+    PlaceContig {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        details: PathBuf,
+        #[arg(long, default_value = "5")]
+        min_tags: usize,
+        #[arg(long, default_value = "3")]
+        min_adjacencies: usize,
+        #[arg(long, default_value_t = 25)]
+        max_targets: usize,
+    },
+    /// Segment query contigs and report dominant genome/cluster transitions.
+    ScanChimera {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value = "50kb")]
+        window: String,
+        #[arg(long, default_value_t = 10)]
+        min_window_tags: usize,
+        #[arg(long, default_value_t = 25)]
+        max_targets: usize,
+        #[arg(long, default_value_t = 0.20)]
+        min_transition_confidence: f64,
+    },
+
+    /// Normalize an existing GFF3/GTF or feature annotation table.
+    ClusterIngest {
+        #[arg(long)]
+        genome_id: Option<String>,
+        #[arg(long, conflicts_with = "features")]
+        gff: Option<PathBuf>,
+        #[arg(long, conflicts_with = "gff")]
+        features: Option<PathBuf>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Build gene clusters from a normalized feature table (.s2cl).
+    ClusterBuild {
+        #[arg(long)]
+        features: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 5_000)]
+        max_gap: u64,
+        #[arg(long, default_value_t = 3)]
+        min_genes: usize,
+    },
+    /// Build a reusable gene-cluster database (.s2cldb).
+    ClusterIndex {
+        #[arg(long, num_args = 1..)]
+        cluster_files: Vec<PathBuf>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Search query gene clusters against a gene-cluster database.
+    SearchCluster {
+        #[arg(long)]
+        query: PathBuf,
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value_t = 5_000)]
+        max_gap: u64,
+        #[arg(long, default_value_t = 3)]
+        min_genes: usize,
+        #[arg(long, default_value_t = 0.25)]
+        min_functional_jaccard: f64,
+        #[arg(long, default_value_t = 0.10)]
+        min_synteny: f64,
+        #[arg(long, default_value_t = 25)]
+        max_targets: usize,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Digest{input,output,enzymes,format,mode,kmer,scale}=>{
-            let src=parse_landmark_mode(&mode,kmer,scale)?;
+        Commands::Digest {
+            input,
+            output,
+            enzymes,
+            format,
+            mode,
+            kmer,
+            scale,
+        } => {
+            let src = parse_landmark_mode(&mode, kmer, scale)?;
             // `--enzymes` is only parsed in 2brad mode, so an unknown name is
             // still an error there but a leftover default is not one here.
-            let ez=match src{LandmarkMode::TwoBRad=>parse_enzyme_list(&enzymes)?,
-                             LandmarkMode::FracMinHash(_)=>Vec::new()};
-            run_digest(&input,&output,&ez,&format,src)?;Ok(())}
-        Commands::Synteny{input,output}=>{run_synteny(&input,&output)?;Ok(())}
-        Commands::Coverage{input:_,enzymes}=>{println!("Coverage — WIP ({} enzymes)",parse_enzyme_list(&enzymes)?.len());Ok(())}
-        Commands::Convert{..}=>{println!("Convert — WIP");Ok(())}
-        Commands::Scaffold{reference,draft,output,min_tags}=>run_scaffold(&reference,&draft,&output,min_tags),
-    }
-}
-
-// ── Scaffold ────────────────────────────────────────────────────────────────
-
-struct AnchoredContig{#[allow(dead_code)] contig_id:u16,contig_name:String,median_ref:u64,is_reverse:bool,length:u64}
-struct OrientationResult{count:usize,positions:Vec<(u64,u64,Strand)>}
-
-fn run_scaffold(ref_path:&PathBuf,draft_path:&PathBuf,out_path:&PathBuf,min_tags:usize)->Result<()>{
-    use std::io::Write;
-
-    let ref_r=load_single_tgt(ref_path)?;
-    let draft_r=load_single_tgt(draft_path)?;
-    println!("Ref: {} tags, {} contig(s)",ref_r.tags.len(),ref_r.contig_names.len().max(1));
-    println!("Draft: {} tags, {} contig(s)",draft_r.tags.len(),draft_r.contig_names.len().max(1));
-
-    let mut ref_map:HashMap<[u8;32],Vec<(u64,u16,Strand)>>=HashMap::new();
-    for t in &ref_r.tags{ref_map.entry(t.sequence).or_default().push((t.position,t.contig_id,t.strand));}
-
-    let mut draft_contigs:HashMap<u16,Vec<&Tag>>=HashMap::new();
-    for t in &draft_r.tags{draft_contigs.entry(t.contig_id).or_default().push(t);}
-
-    let mut contig_lengths: HashMap<u16, u64> = HashMap::new();
-    for i in 0..draft_r.contig_offsets.len() {
-        let cid = (i + 1) as u16;
-        let start = draft_r.contig_offsets[i];
-        let end = if i + 1 < draft_r.contig_offsets.len() {
-            draft_r.contig_offsets[i + 1]
-        } else {
-            draft_r.total_length
-        };
-        contig_lengths.insert(cid, end - start);
-    }
-    // Also handle contig_id 0 (single contig case)
-    if draft_r.contig_offsets.is_empty() {
-        contig_lengths.insert(0, draft_r.total_length);
-    }
-
-    let mut anchored:Vec<AnchoredContig>=Vec::new();
-
-    for (cid,tags) in &draft_contigs{
-        let name=if *cid==0{if draft_r.contig_names.is_empty(){"contig_0".into()}else{draft_r.genome_id.clone()}}
-        else{draft_r.contig_names.get((*cid-1)as usize).cloned().unwrap_or_else(||format!("contig_{}",cid))};
-
-        let fwd=evaluate_orientation(tags,&ref_map,false);
-        let rev=evaluate_orientation(tags,&ref_map,true);
-
-        match (&fwd,&rev){(Some(a),Some(b))=>println!("DBG {}: fwd={} rev={}",name,a.count,b.count),_=>()};
-
-        let (is_rev,_shared,tc)=match(fwd,rev){
-            (Some(f),Some(r))=>{
-                let ratio=if f.count>0{r.count as f64/f.count as f64}else{f64::INFINITY};
-                if ratio>2.0{(true,r.positions,r.count)}else if ratio<0.5{(false,f.positions,f.count)}else{(false,f.positions,f.count)}
+            let ez = match src {
+                LandmarkMode::TwoBRad => parse_enzyme_list(&enzymes)?,
+                LandmarkMode::FracMinHash(_) => Vec::new(),
+            };
+            run_digest(&input, &output, &ez, &format, src)?;
+            Ok(())
+        }
+        Commands::Synteny { input, output } => {
+            run_synteny(&input, &output)?;
+            Ok(())
+        }
+        Commands::Coverage { input: _, enzymes } => {
+            println!(
+                "Coverage — WIP ({} enzymes)",
+                parse_enzyme_list(&enzymes)?.len()
+            );
+            Ok(())
+        }
+        Commands::Convert { .. } => {
+            println!("Convert — WIP");
+            Ok(())
+        }
+        Commands::Scaffold {
+            reference,
+            draft,
+            output,
+            min_tags,
+        } => bsyn::search::run_scaffold(&reference, &draft, &output, min_tags),
+        Commands::ContigIndex {
+            genome_tgt_dir,
+            output,
+            genome_metadata,
+        } => {
+            let metadata = genome_metadata
+                .as_deref()
+                .map(bsyn::search::read_genome_metadata)
+                .transpose()?;
+            let index = bsyn::search::build_index(&genome_tgt_dir, metadata.as_ref())?;
+            index.write(&output)?;
+            println!(
+                "Indexed {} genome(s), {} contig(s), {} landmark(s) -> {:?}",
+                index.genomes.len(),
+                index.contigs.len(),
+                index.sequences.len(),
+                output
+            );
+            Ok(())
+        }
+        Commands::SearchContig {
+            index,
+            query,
+            output,
+            min_tags,
+            min_adjacencies,
+            max_targets,
+        } => {
+            let index = bsyn::search::ContigIndex::read(&index)?;
+            let records = bsyn::search::read_tgt_records(&query)?;
+            let options = bsyn::search::SearchOptions {
+                min_tags,
+                min_adjacencies,
+                max_targets,
+            };
+            let placements = bsyn::search::search_records(&records, &index, options);
+            bsyn::search::write_placements(&output, &placements)?;
+            println!(
+                "Placed {} query contig(s) -> {:?}",
+                placements.len(),
+                output
+            );
+            Ok(())
+        }
+        Commands::PlaceContig {
+            index,
+            query,
+            output,
+            details,
+            min_tags,
+            min_adjacencies,
+            max_targets,
+        } => {
+            let index = bsyn::search::ContigIndex::read(&index)?;
+            let records = bsyn::search::read_tgt_records(&query)?;
+            let options = bsyn::search::SearchOptions {
+                min_tags,
+                min_adjacencies,
+                max_targets,
+            };
+            let placements = bsyn::search::search_records(&records, &index, options);
+            bsyn::search::write_placements(&output, &placements)?;
+            bsyn::search::write_placement_details(&details, &placements)?;
+            let hits = output.with_extension("hits.tsv");
+            bsyn::search::write_candidate_hits(&hits, &placements)?;
+            println!(
+                "Placed {} query contig(s) -> {:?}",
+                placements.len(),
+                output
+            );
+            Ok(())
+        }
+        Commands::ScanChimera {
+            index,
+            query,
+            output,
+            window,
+            min_window_tags,
+            max_targets,
+            min_transition_confidence,
+        } => {
+            let index = bsyn::search::ContigIndex::read(&index)?;
+            let records = bsyn::search::read_tgt_records(&query)?;
+            let options = bsyn::search::ChimeraOptions {
+                window: parse_size(&window)?,
+                min_window_tags,
+                max_targets,
+                min_transition_confidence,
+            };
+            let mut segments = Vec::new();
+            for record in &records {
+                segments.extend(bsyn::search::scan_record(record, &index, options));
             }
-            (Some(f),None)=>(false,f.positions,f.count),
-            (None,Some(r))=>(true,r.positions,r.count),
-            (None,None)=>continue,
-        };
-        if tc<min_tags{continue;}
-        let mut rp:Vec<u64>=_shared.iter().map(|&(p,_,_)|p).collect();rp.sort();
-        let med=rp[rp.len()/2];
-        let length = *contig_lengths.get(cid).unwrap_or(&1000);
-        anchored.push(AnchoredContig{contig_id:*cid,contig_name:name,median_ref:med,is_reverse:is_rev,length});
-    }
-
-    anchored.sort_by_key(|a|a.median_ref);
-    println!("Anchored {} contig(s)",anchored.len());
-
-    let mut f=std::fs::File::create(out_path)?;
-    writeln!(f,"## AGP version 2.1")?;
-    writeln!(f,"# Ref: {}  Draft: {}",ref_r.genome_id,draft_r.genome_id)?;
-    let mut st=1u64;let mut pn=1usize;
-    for (i,c) in anchored.iter().enumerate(){
-        let strand=if c.is_reverse{"-"}else{"+"};
-        let obj_end=st+c.length-1;
-        writeln!(f,"scaffold_1\t{}\t{}\t{}\tW\t{}\t1\t{}\t{}",st,obj_end,pn,c.contig_name,c.length,strand)?;
-        st=obj_end+1;pn+=1;
-        if i+1<anchored.len(){
-            let ref_gap = if anchored[i+1].median_ref > c.median_ref {
-                anchored[i+1].median_ref - c.median_ref
-            } else { 0 };
-            let next_len = anchored[i+1].length;
-            let gap_size = if ref_gap > c.length + next_len {
-                ref_gap - c.length/2 - next_len/2
-            } else { 10 };
-            let gap_end = st + gap_size - 1;
-            writeln!(f,"scaffold_1\t{}\t{}\t{}\tN\t{}\tscaffold\tyes\tpair",st,gap_end,pn,gap_size)?;
-            st=gap_end+1;pn+=1;
+            bsyn::search::write_chimerism(&output, &segments)?;
+            println!(
+                "Wrote {} chimerism window(s) -> {:?}",
+                segments.len(),
+                output
+            );
+            Ok(())
+        }
+        Commands::ClusterIngest {
+            genome_id,
+            gff,
+            features,
+            output,
+        } => {
+            let mut parsed = if let Some(path) = gff {
+                let genome_id = genome_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("--genome-id is required with --gff"))?;
+                bsyn::cluster::parse_gff(&path, genome_id)?
+            } else if let Some(path) = features {
+                let mut parsed = bsyn::cluster::parse_features(&path)?;
+                if let Some(genome_id) = genome_id {
+                    for feature in &mut parsed {
+                        feature.genome_id = genome_id.clone();
+                    }
+                }
+                parsed
+            } else {
+                anyhow::bail!("provide --gff or --features");
+            };
+            parsed.sort_by(|a, b| {
+                a.genome_id
+                    .cmp(&b.genome_id)
+                    .then(a.contig_id.cmp(&b.contig_id))
+                    .then(a.start.cmp(&b.start))
+                    .then(a.gene_id.cmp(&b.gene_id))
+            });
+            bsyn::cluster::write_features(&output, &parsed)?;
+            println!("Ingested {} feature(s) -> {:?}", parsed.len(), output);
+            Ok(())
+        }
+        Commands::ClusterBuild {
+            features,
+            output,
+            max_gap,
+            min_genes,
+        } => {
+            let clusters = bsyn::cluster::build_clusters(
+                bsyn::cluster::parse_features(&features)?,
+                max_gap,
+                min_genes,
+            )?;
+            bsyn::cluster::write_cluster_file(&output, &clusters)?;
+            println!("Built {} gene cluster(s) -> {:?}", clusters.len(), output);
+            Ok(())
+        }
+        Commands::ClusterIndex {
+            cluster_files,
+            output,
+        } => {
+            let index = bsyn::cluster::build_cluster_index(&cluster_files)?;
+            index.write(&output)?;
+            println!(
+                "Indexed {} gene cluster(s), {} token posting(s) -> {:?}",
+                index.clusters.len(),
+                index.token_postings.len(),
+                output
+            );
+            Ok(())
+        }
+        Commands::SearchCluster {
+            query,
+            index,
+            output,
+            max_gap,
+            min_genes,
+            min_functional_jaccard,
+            min_synteny,
+            max_targets,
+        } => {
+            let index = bsyn::cluster::ClusterIndex::read(&index)?;
+            let options = bsyn::cluster::ClusterSearchOptions {
+                min_functional_jaccard,
+                min_synteny,
+                max_targets,
+            };
+            let hits =
+                bsyn::cluster::search_feature_table(&query, &index, max_gap, min_genes, options)?;
+            bsyn::cluster::write_cluster_hits(&output, &hits)?;
+            println!("Wrote {} cluster hit(s) -> {:?}", hits.len(), output);
+            Ok(())
         }
     }
-    println!("Scaffold written to {:?}",out_path);
-    Ok(())
 }
 
 // ── Synteny ─────────────────────────────────────────────────────────────────
 
 fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
-    use std::io::Write;
     use bsyn::synteny::graph::TagAdjacencyGraph;
     use bsyn::synteny::scoring::{pairwise_synteny_matrix, structural_synteny};
     use bsyn::tgt::TgtReader;
+    use std::io::Write;
 
     // Collect all .tgt files from input directory
     let mut tgt_files = Vec::new();
@@ -205,7 +474,10 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
             // "unrelated genomes" and is the wrong diagnosis. Caught here, where
             // the file names are still in hand to name in the message.
             let fmh = !record.tags.is_empty()
-                && record.tags.iter().all(|t| t.enzyme == EnzymeType::FracMinHash);
+                && record
+                    .tags
+                    .iter()
+                    .all(|t| t.enzyme == EnzymeType::FracMinHash);
             if let Some((first_id, first_fmh)) = sources.first() {
                 if *first_fmh != fmh {
                     let name = |f: bool| if f { "FracMinHash" } else { "2bRAD enzyme" };
@@ -215,13 +487,20 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
                          so a comparison across them would report no similarity \
                          rather than an error. Re-run `digest` on both with the same \
                          --mode.",
-                        first_id, name(*first_fmh), genome_id, name(fmh)
+                        first_id,
+                        name(*first_fmh),
+                        genome_id,
+                        name(fmh)
                     );
                 }
             }
             sources.push((genome_id.clone(), fmh));
-            println!("  Adding genome: {} ({} {})", genome_id, record.tags.len(),
-                     if fmh { "FracMinHash landmarks" } else { "tags" });
+            println!(
+                "  Adding genome: {} ({} {})",
+                genome_id,
+                record.tags.len(),
+                if fmh { "FracMinHash landmarks" } else { "tags" }
+            );
             graph.add_genome(&genome_id, &record);
             genome_ids.push(genome_id);
             records.push(record);
@@ -230,7 +509,12 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
 
     graph.build_edges();
 
-    println!("Graph: {} nodes, {} edges, {} genomes", graph.node_count(), graph.edge_count(), graph.num_genomes);
+    println!(
+        "Graph: {} nodes, {} edges, {} genomes",
+        graph.node_count(),
+        graph.edge_count(),
+        graph.num_genomes
+    );
 
     // Compute pairwise matrix
     let matrix = pairwise_synteny_matrix(&graph);
@@ -238,29 +522,86 @@ fn run_synteny(input_dir: &PathBuf, output_path: &PathBuf) -> Result<()> {
     // Write output
     let mut f = std::fs::File::create(output_path)?;
     writeln!(f, "# Syn2b Pairwise Synteny Matrix")?;
-    writeln!(f, "# breakpoints = junctions: adjacencies of A that B does not")?;
-    writeln!(f, "#   conserve. Exactly 2 per inversion, 3 per translocation, 0")?;
-    writeln!(f, "#   under substitution loads to at least 5%. This is the column")?;
+    writeln!(
+        f,
+        "# breakpoints = junctions: adjacencies of A that B does not"
+    )?;
+    writeln!(
+        f,
+        "#   conserve. Exactly 2 per inversion, 3 per translocation, 0"
+    )?;
+    writeln!(
+        f,
+        "#   under substitution loads to at least 5%. This is the column"
+    )?;
     writeln!(f, "#   to use; junction coordinates are written alongside.")?;
-    writeln!(f, "# scj_distance = symmetric difference of the adjacency sets, the")?;
-    writeln!(f, "#   single-cut-or-join distance; twice breakpoints when circular.")?;
-    writeln!(f, "# inverted_fraction = shared landmarks whose orientation differs,")?;
-    writeln!(f, "#   over the orientation-informative ones. Measures how much of")?;
-    writeln!(f, "#   the genome moved; breakpoints measures how often. A fraction,")?;
-    writeln!(f, "#   so it is comparable with alignment-based synteny measures.")?;
-    writeln!(f, "# raw_inverted_fraction = same numerator, but relative to genome_A")?;
-    writeln!(f, "#   (no majority-frame flip). Ranges in [0,1] and matches fixed-")?;
+    writeln!(
+        f,
+        "# scj_distance = symmetric difference of the adjacency sets, the"
+    )?;
+    writeln!(
+        f,
+        "#   single-cut-or-join distance; twice breakpoints when circular."
+    )?;
+    writeln!(
+        f,
+        "# inverted_fraction = shared landmarks whose orientation differs,"
+    )?;
+    writeln!(
+        f,
+        "#   over the orientation-informative ones. Measures how much of"
+    )?;
+    writeln!(
+        f,
+        "#   the genome moved; breakpoints measures how often. A fraction,"
+    )?;
+    writeln!(
+        f,
+        "#   so it is comparable with alignment-based synteny measures."
+    )?;
+    writeln!(
+        f,
+        "# raw_inverted_fraction = same numerator, but relative to genome_A"
+    )?;
+    writeln!(
+        f,
+        "#   (no majority-frame flip). Ranges in [0,1] and matches fixed-"
+    )?;
     writeln!(f, "#   reference alignment methods such as dnadiff.")?;
-    writeln!(f, "# observable_fraction = share of A's adjacencies that B can judge")?;
-    writeln!(f, "#   at all; the rest are stranded at contig ends. THIS is where")?;
-    writeln!(f, "#   contig count belongs -- as a discount on detection power, not")?;
-    writeln!(f, "#   as a divisor of breakpoints. Expect to recover about this")?;
+    writeln!(
+        f,
+        "# observable_fraction = share of A's adjacencies that B can judge"
+    )?;
+    writeln!(
+        f,
+        "#   at all; the rest are stranded at contig ends. THIS is where"
+    )?;
+    writeln!(
+        f,
+        "#   contig count belongs -- as a discount on detection power, not"
+    )?;
+    writeln!(
+        f,
+        "#   as a divisor of breakpoints. Expect to recover about this"
+    )?;
     writeln!(f, "#   fraction of the true junctions.")?;
-    writeln!(f, "# structural = conserved adjacencies over their union. Kept for")?;
-    writeln!(f, "#   continuity, but it divides a discrete event by the landmark")?;
+    writeln!(
+        f,
+        "# structural = conserved adjacencies over their union. Kept for"
+    )?;
+    writeln!(
+        f,
+        "#   continuity, but it divides a discrete event by the landmark"
+    )?;
     writeln!(f, "#   count, so one inversion moves it by ~0.001.")?;
-    writeln!(f, "# legacy_adjacency = the original metric: all consecutive tags, no")?;
-    writeln!(f, "#   canonicalisation. Dominated by substitution load, not structure.")?;
+    writeln!(
+        f,
+        "# legacy_adjacency = the original metric: all consecutive tags, no"
+    )?;
+    writeln!(
+        f,
+        "#   canonicalisation. Dominated by substitution load, not structure."
+    )?;
     writeln!(
         f,
         "genome_A,genome_B,breakpoints,scj_distance,breakpoint_density,\
@@ -285,11 +626,23 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
                     writeln!(
                         f,
                         "{},{},{},{},{:.5},{:.5},{:.5},{},{},{},{:.4},{},{:.4},{},{},{},{},{:.4}",
-                        gi, gj, r.breakpoints, r.scj_distance, r.breakpoint_density,
-                        r.inverted_fraction, r.raw_inverted_fraction, r.orientation_mismatches,
-                        r.orientation_mismatches_raw, r.orientation_uninformative,
-                        r.observable_fraction, r.observable_adjacencies, r.score,
-                        r.shared_tags, r.repeats_dropped, r.landmarks_collapsed, r.circular,
+                        gi,
+                        gj,
+                        r.breakpoints,
+                        r.scj_distance,
+                        r.breakpoint_density,
+                        r.inverted_fraction,
+                        r.raw_inverted_fraction,
+                        r.orientation_mismatches,
+                        r.orientation_mismatches_raw,
+                        r.orientation_uninformative,
+                        r.observable_fraction,
+                        r.observable_adjacencies,
+                        r.score,
+                        r.shared_tags,
+                        r.repeats_dropped,
+                        r.landmarks_collapsed,
+                        r.circular,
                         legacy
                     )?;
                     for pos in &r.junctions {
@@ -310,75 +663,94 @@ shared_tags,repeats_dropped,landmarks_collapsed,circular,legacy_adjacency"
     Ok(())
 }
 
-fn evaluate_orientation(tags:&[&Tag],ref_map:&HashMap<[u8;32],Vec<(u64,u16,Strand)>>,is_rev:bool)->Option<OrientationResult>{
-    let mut sp:Vec<(u64,u64,Strand)>=Vec::new();
-    for t in tags{
-        let lookup=if is_rev{reverse_complement_32(&t.sequence)}else{t.sequence};
-        if let Some(e)=ref_map.get(&lookup){for&(rp,_,rs)in e{sp.push((rp,t.position,rs));}}
-    }
-    if sp.is_empty(){return None;}
-    sp.sort_by_key(|&(_,dp,_)|dp);
-    Some(OrientationResult{count:sp.len(),positions:sp})
-}
-
-fn reverse_complement_32(s:&[u8;32])->[u8;32]{let mut r=[0u8;32];for i in 0..32{r[i]=comp_base(s[31-i]);}r}
-fn comp_base(b:u8)->u8{match b{b'A'|b'a'=>b'T',b'T'|b't'=>b'A',b'C'|b'c'=>b'G',b'G'|b'g'=>b'C',_=>b'N'}}
-
-fn load_single_tgt(p:&PathBuf)->Result<TgtRecord>{
-    use bsyn::tgt::TgtReader;
-    let mut r=TgtReader::new(p)?;
-    if let Some(rec)=r.read_record()?{Ok(rec)}else{anyhow::bail!("No TGT in {:?}",p)}
-}
-
 // ── Digest ──────────────────────────────────────────────────────────────────
 
-fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str,src:LandmarkMode)->Result<()>{
+fn run_digest(
+    inp: &PathBuf,
+    out: &PathBuf,
+    enzymes: &[EnzymeType],
+    fmt: &str,
+    src: LandmarkMode,
+) -> Result<()> {
     use bsyn::io::fasta::FastaReader;
     use bsyn::tgt::TgtWriter;
-    let bin=fmt=="binary";
-    let mut tw=TgtWriter::new(out)?;
-    let mut r=FastaReader::new(inp)?;
-    let mut cid=1u16;let mut off=0u64;let mut names=Vec::new();let mut circular=Vec::new();
-    let mut all_tags:Vec<Tag>=Vec::new();let mut gid=String::new();let mut tot=0u64;
-    while let Some(rec)=r.next_record()?{
-        if gid.is_empty(){gid=rec.id.clone();}
-        let sl=rec.sequence.len() as u64;tot+=sl;names.push(rec.id.clone());
-        circular.push(header_says_circular(&rec.id,rec.description.as_deref()));
-        match src{
-            LandmarkMode::TwoBRad=>{
+    let bin = fmt == "binary";
+    let mut tw = TgtWriter::new(out)?;
+    let mut r = FastaReader::new(inp)?;
+    let mut cid = 1u16;
+    let mut off = 0u64;
+    let mut names = Vec::new();
+    let mut circular = Vec::new();
+    let mut all_tags: Vec<Tag> = Vec::new();
+    let mut gid = String::new();
+    let mut tot = 0u64;
+    while let Some(rec) = r.next_record()? {
+        if gid.is_empty() {
+            gid = rec.id.clone();
+        }
+        let sl = rec.sequence.len() as u64;
+        tot += sl;
+        names.push(rec.id.clone());
+        circular.push(header_says_circular(&rec.id, rec.description.as_deref()));
+        match src {
+            LandmarkMode::TwoBRad => {
                 use rayon::prelude::*;
                 let enzyme_tags: Vec<Vec<Tag>> = enzymes
                     .par_iter()
-                    .map(|&e| bsyn::enzyme::digest::digest_genome_contig(&rec.sequence, e, cid, off))
+                    .map(|&e| {
+                        bsyn::enzyme::digest::digest_genome_contig(&rec.sequence, e, cid, off)
+                    })
                     .collect();
-                for t in enzyme_tags { all_tags.extend(t); }
+                for t in enzyme_tags {
+                    all_tags.extend(t);
+                }
             }
             // Not parallelised over anything: the rolling encoder is a single pass
             // that must carry state across the contig, and contigs are already the
             // unit of the outer loop.
-            LandmarkMode::FracMinHash(f)=>{
+            LandmarkMode::FracMinHash(f) => {
                 all_tags.extend(f.landmarks(&rec.sequence, cid, off));
             }
         }
-        off+=sl;cid+=1;
+        off += sl;
+        cid += 1;
     }
-    let mut rec=TgtRecord::new(&gid,tot);
-    for t in all_tags{rec.add_tag(t);}
-    rec.contig_names=names;
+    let mut rec = TgtRecord::new(&gid, tot);
+    for t in all_tags {
+        rec.add_tag(t);
+    }
+    rec.contig_names = names;
     // All-false means the headers said nothing, which must stay distinguishable
     // from "every contig is linear" — closure falls back to the single-contig
     // rule only when the topology is unknown.
-    if circular.iter().any(|&c|c){rec.contig_circular=circular;}
-    let mut r2=FastaReader::new(inp)?;let mut o=0u64;
-    while let Some(fr)=r2.next_record()?{rec.contig_offsets.push(o);o+=fr.sequence.len()as u64;}
-    if bin{tw.write_binary(&rec)?;}else{tw.write_record(&rec)?;}
-    let n_circ=rec.contig_circular.iter().filter(|&&c|c).count();
-    let what=match src{
-        LandmarkMode::TwoBRad=>format!("{} enzyme(s)",enzymes.len()),
-        LandmarkMode::FracMinHash(f)=>format!("FracMinHash k={} scale={}",f.k,f.scale),
+    if circular.iter().any(|&c| c) {
+        rec.contig_circular = circular;
+    }
+    let mut r2 = FastaReader::new(inp)?;
+    let mut o = 0u64;
+    while let Some(fr) = r2.next_record()? {
+        rec.contig_offsets.push(o);
+        o += fr.sequence.len() as u64;
+    }
+    if bin {
+        tw.write_binary(&rec)?;
+    } else {
+        tw.write_record(&rec)?;
+    }
+    let n_circ = rec.contig_circular.iter().filter(|&&c| c).count();
+    let what = match src {
+        LandmarkMode::TwoBRad => format!("{} enzyme(s)", enzymes.len()),
+        LandmarkMode::FracMinHash(f) => format!("FracMinHash k={} scale={}", f.k, f.scale),
     };
-    println!("Digested {} contigs ({} circular), {} bp, {} landmarks [{}] -> {:?}",
-        rec.contig_names.len(),n_circ,tot,rec.tags.len(),what,out);
+    println!(
+        "Digested {} contigs ({} circular), {} bp, {} landmarks [{}] -> {:?}",
+        rec.contig_names.len(),
+        n_circ,
+        tot,
+        rec.tags.len(),
+        what,
+        out
+    );
     Ok(())
 }
 
@@ -389,15 +761,24 @@ fn run_digest(inp:&PathBuf,out:&PathBuf,enzymes:&[EnzymeType],fmt:&str,src:Landm
 /// INSDC/NCBI convention is `[topology=circular]`. Some pipelines only append
 /// `_circular` to the name. A header that says nothing leaves the topology
 /// unknown, which is not the same as linear.
-fn header_says_circular(id:&str,desc:Option<&str>)->bool{
-    let hay=format!("{} {}",id,desc.unwrap_or("")).to_ascii_lowercase();
-    for key in ["circular=true","circular=yes","suggestcircular=yes",
-                "topology=circular","completeness=complete circular"]{
-        if hay.contains(key){return true;}
+fn header_says_circular(id: &str, desc: Option<&str>) -> bool {
+    let hay = format!("{} {}", id, desc.unwrap_or("")).to_ascii_lowercase();
+    for key in [
+        "circular=true",
+        "circular=yes",
+        "suggestcircular=yes",
+        "topology=circular",
+        "completeness=complete circular",
+    ] {
+        if hay.contains(key) {
+            return true;
+        }
     }
     // bare word forms: `[circular]`, trailing `_circular`, ` circular` as a token
-    hay.split(|c:char|!c.is_ascii_alphanumeric()).any(|t|t=="circular")
-        && !hay.contains("circular=false") && !hay.contains("circular=no")
+    hay.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|t| t == "circular")
+        && !hay.contains("circular=false")
+        && !hay.contains("circular=no")
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -408,39 +789,98 @@ fn header_says_circular(id:&str,desc:Option<&str>)->bool{
 /// comparison across sources, because enzyme tags and FracMinHash k-mers are
 /// different alphabets of landmark and an empty intersection between them would
 /// otherwise read as "unrelated genomes".
-#[derive(Clone,Copy,Debug)]
-enum LandmarkMode{TwoBRad,FracMinHash(bsyn::landmark::FracMinHash)}
+#[derive(Clone, Copy, Debug)]
+enum LandmarkMode {
+    TwoBRad,
+    FracMinHash(bsyn::landmark::FracMinHash),
+}
 
-fn parse_landmark_mode(mode:&str,k:usize,scale:u64)->Result<LandmarkMode>{
-    match mode.to_ascii_lowercase().as_str(){
-        "2brad"|"enzyme"|"digest"=>Ok(LandmarkMode::TwoBRad),
-        "fracminhash"|"fmh"|"sketch"=>
-            Ok(LandmarkMode::FracMinHash(bsyn::landmark::FracMinHash::new(k,scale)?)),
-        other=>anyhow::bail!("Unknown --mode {:?} (expected `2brad` or `fracminhash`)",other),
+fn parse_landmark_mode(mode: &str, k: usize, scale: u64) -> Result<LandmarkMode> {
+    match mode.to_ascii_lowercase().as_str() {
+        "2brad" | "enzyme" | "digest" => Ok(LandmarkMode::TwoBRad),
+        "fracminhash" | "fmh" | "sketch" => Ok(LandmarkMode::FracMinHash(
+            bsyn::landmark::FracMinHash::new(k, scale)?,
+        )),
+        other => anyhow::bail!(
+            "Unknown --mode {:?} (expected `2brad` or `fracminhash`)",
+            other
+        ),
     }
 }
 
-fn parse_enzyme_list(s:&str)->Result<Vec<EnzymeType>>{
-    if s=="all"{return Ok(EnzymeType::all().to_vec());}
-    let mut v=Vec::new();
-    for n in s.split(','){v.push(parse_enzyme_name(n.trim())?);}
-    if v.is_empty(){anyhow::bail!("No enzymes");}Ok(v)
+fn parse_enzyme_list(s: &str) -> Result<Vec<EnzymeType>> {
+    if s == "all" {
+        return Ok(EnzymeType::all().to_vec());
+    }
+    let mut v = Vec::new();
+    for n in s.split(',') {
+        v.push(parse_enzyme_name(n.trim())?);
+    }
+    if v.is_empty() {
+        anyhow::bail!("No enzymes");
+    }
+    Ok(v)
 }
-fn parse_enzyme_name(n:&str)->Result<EnzymeType>{
-    match n{"BcgI"=>Ok(EnzymeType::BcgI),"AlfI"=>Ok(EnzymeType::AlfI),"AloI"=>Ok(EnzymeType::AloI),"BaeI"=>Ok(EnzymeType::BaeI),
-        "BplI"=>Ok(EnzymeType::BplI),"BsaXI"=>Ok(EnzymeType::BsaXI),"BslFI"=>Ok(EnzymeType::BslFI),"Bsp24I"=>Ok(EnzymeType::Bsp24I),
-        "CjeI"=>Ok(EnzymeType::CjeI),"CjePI"=>Ok(EnzymeType::CjePI),"CspCI"=>Ok(EnzymeType::CspCI),"FalI"=>Ok(EnzymeType::FalI),
-        "HaeIV"=>Ok(EnzymeType::HaeIV),"Hin4I"=>Ok(EnzymeType::Hin4I),"PpiI"=>Ok(EnzymeType::PpiI),"PsrI"=>Ok(EnzymeType::PsrI),
-        "FracMinHash"|"FMH"=>anyhow::bail!(
-            "FracMinHash is a landmark source, not an enzyme — use `--mode fracminhash`"),
-        _=>anyhow::bail!("Unknown enzyme: {}",n)}
+/// Parse sizes accepted by the chimera CLI: `50000`, `50kb`, `1mb`, `2kbp`.
+fn parse_size(value: &str) -> Result<u64> {
+    let value = value.trim().to_ascii_lowercase();
+    let (digits, multiplier) = if let Some(x) = value.strip_suffix("kbp") {
+        (x, 1_024u64.pow(1))
+    } else if let Some(x) = value.strip_suffix("kb") {
+        (x, 1_024)
+    } else if let Some(x) = value.strip_suffix("mbp") {
+        (x, 1_024u64.pow(2))
+    } else if let Some(x) = value.strip_suffix("mb") {
+        (x, 1_024u64.pow(2))
+    } else {
+        (value.as_str(), 1)
+    };
+    let parsed = digits
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid size {:?}; expected e.g. 50000 or 50kb", value))?;
+    parsed
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("size {:?} overflows u64", value))
+}
+
+fn parse_enzyme_name(n: &str) -> Result<EnzymeType> {
+    match n {
+        "BcgI" => Ok(EnzymeType::BcgI),
+        "AlfI" => Ok(EnzymeType::AlfI),
+        "AloI" => Ok(EnzymeType::AloI),
+        "BaeI" => Ok(EnzymeType::BaeI),
+        "BplI" => Ok(EnzymeType::BplI),
+        "BsaXI" => Ok(EnzymeType::BsaXI),
+        "BslFI" => Ok(EnzymeType::BslFI),
+        "Bsp24I" => Ok(EnzymeType::Bsp24I),
+        "CjeI" => Ok(EnzymeType::CjeI),
+        "CjePI" => Ok(EnzymeType::CjePI),
+        "CspCI" => Ok(EnzymeType::CspCI),
+        "FalI" => Ok(EnzymeType::FalI),
+        "HaeIV" => Ok(EnzymeType::HaeIV),
+        "Hin4I" => Ok(EnzymeType::Hin4I),
+        "PpiI" => Ok(EnzymeType::PpiI),
+        "PsrI" => Ok(EnzymeType::PsrI),
+        "FracMinHash" | "FMH" => anyhow::bail!(
+            "FracMinHash is a landmark source, not an enzyme — use `--mode fracminhash`"
+        ),
+        _ => anyhow::bail!("Unknown enzyme: {}", n),
+    }
 }
 
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
-    #[test]fn t1(){assert_eq!(parse_enzyme_list("all").unwrap().len(),16);}
-    #[test]fn t2(){assert_eq!(parse_enzyme_list("BcgI").unwrap()[0],EnzymeType::BcgI);}
-    #[test]fn t3(){assert!(parse_enzyme_name("X").is_err());}
-    #[test]fn t4(){assert_eq!(comp_base(b'A'),b'T');assert_eq!(comp_base(b'G'),b'C');}
+    #[test]
+    fn t1() {
+        assert_eq!(parse_enzyme_list("all").unwrap().len(), 16);
+    }
+    #[test]
+    fn t2() {
+        assert_eq!(parse_enzyme_list("BcgI").unwrap()[0], EnzymeType::BcgI);
+    }
+    #[test]
+    fn t3() {
+        assert!(parse_enzyme_name("X").is_err());
+    }
 }
