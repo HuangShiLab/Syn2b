@@ -44,6 +44,7 @@ def fasta_records(path: Path):
             genome_id = genome_id[: -len(suffix)]
             break
     name = None
+    record_index = 0
     seq: list[str] = []
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt") as handle:
@@ -51,19 +52,20 @@ def fasta_records(path: Path):
             line = line.strip()
             if line.startswith(">"):
                 if name is not None:
-                    yield genome_id, "".join(seq)
+                    yield genome_id, "".join(seq), record_index
+                record_index += 1
                 name = line[1:].split()[0]
                 seq = []
             elif line:
                 seq.append(line)
     if name is not None:
-        yield genome_id, "".join(seq)
+        yield genome_id, "".join(seq), record_index
 
 
 def fragment_fastas(paths: list[Path], sizes: list[int], destination: Path) -> list[dict]:
     jobs = []
     for source in paths:
-        for genome_id, sequence in fasta_records(source):
+        for genome_id, sequence, record_index in fasta_records(source):
             for size in sizes:
                 if len(sequence) < size:
                     continue
@@ -72,7 +74,7 @@ def fragment_fastas(paths: list[Path], sizes: list[int], destination: Path) -> l
                     fragment = sequence[index * size:(index + 1) * size]
                     if len(fragment) < 100:
                         continue
-                    query_id = f"frag__{genome_id}__{size}__{index:06d}"
+                    query_id = f"frag__{genome_id}__{size}__{index:06d}__{record_index:05d}"
                     fragment_path = destination / f"{query_id}.fna"
                     fragment_path.write_text(f">{query_id}\n{fragment}\n")
                     jobs.append({
