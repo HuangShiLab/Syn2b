@@ -9,7 +9,10 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     container:
-      image: rust:1.83
+      image: rust:1.88
+    env:
+      CARGO_HOME: /usr/local/cargo
+      PATH: /usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
       - uses: actions/checkout@v4
       - name: Cache cargo registry
